@@ -54,8 +54,6 @@ void print_blocked_syscall(char* syscall_name, int count, ...) {
 int main() {
     while(1) {
         print_prompt();
-        // TODO
-        // Show your intelligence
-        break;
+        
     }
 }
