@@ -128,6 +128,46 @@ int find_executable(char *filename) {
     return 0;
 }
 
+#include <string.h>
+
+int check_tokens(char *tokens[]) {
+    if (tokens[0] == NULL) {
+        print_invalid_syntax();
+        return 0;
+    }
+
+    int i = 0;
+
+    while (tokens[i] != NULL) {
+        if (strcmp(tokens[i], "|") == 0) {
+            // 检查管道是否在开头
+            if (i == 0) return 0;
+            // 检查连续管道
+            if (tokens[i + 1] != NULL && (strcmp(tokens[i + 1], "|") == 0 || strcmp(tokens[i + 1], ">") == 0)) return 0;
+            // 检查管道后是否有命令
+            if (tokens[i + 1] == NULL) return 0;
+        }
+        else if (strcmp(tokens[i], ">") == 0) {
+            // 检查重定向是否在开头
+            if (i == 0) return 0;
+            // 检查连续重定向
+            if (tokens[i + 1] != NULL && (strcmp(tokens[i + 1], "|") == 0 || strcmp(tokens[i + 1], ">") == 0)) return 0;
+        }
+        else if (strcmp(tokens[i], "||") == 0) return 0;
+        else if (strcmp(tokens[i], ">>") == 0) return 0;
+        i++;
+    }
+
+    // 检查最后一个 token 是否是操作符
+    if (i > 0 && (strcmp(tokens[i - 1], "|") == 0 || strcmp(tokens[i - 1], ">") == 0)) {
+        print_invalid_syntax();
+        return 0;
+    }
+
+    return 1; // 语法合法
+}
+
+
 int handle_tokens(char *tokens[], int token_count) {
     if (strcmp(tokens[0], "exit") == 0) {
         cmd_exit();
