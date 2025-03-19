@@ -128,8 +128,6 @@ int find_executable(char *filename) {
     return 0;
 }
 
-#include <string.h>
-
 int check_tokens(char *tokens[]) {
     if (tokens[0] == NULL) {
         print_invalid_syntax();
@@ -167,6 +165,98 @@ int check_tokens(char *tokens[]) {
     return 1; // 语法合法
 }
 
+int handle_external_cmd(char *tokens[], int token_count) {
+    //计算管道数和子命令数
+    int pipe_count = 0;
+    for (int i = 0; tokens[i] != NULL; i++) {
+        if (strcmp(tokens[i], "|") == 0) {
+            pipe_count ++;
+        }
+    }
+    int cmd_count = pipe_count + 1;
+
+    //创建管道
+    int pipefds[pipe_count][2];
+    for (int i = 0; i < pipe_count; i++) {
+        if (pipe(pipefds[i]) < 0) {
+            print_execution_error();
+            return 0;
+        }
+    }
+
+    //逐一执行命令
+    pid_t pids[cmd_count];
+    int cmd_idx = 0;
+    int cmd_start = 0;
+    char *current_tokens[MAX_TOKENS];
+        
+    for (int i = 0; i <= token_count; i++) {
+        if (i == token_count || strcmp(tokens[i], "|") == 0) {
+            //构建当前子命令参数
+            int current_token_idx = cmd_start;
+            for (; current_token_idx < i; current_token_idx++) {
+                current_tokens[current_token_idx - cmd_start] = tokens[current_token_idx];
+            }
+            current_tokens[current_token_idx - cmd_start] = NULL;
+
+            //检查命令是否可执行
+            if (!find_executable(current_tokens[0])) {
+                print_command_not_found();
+                return 0;
+            }
+
+            //fork子进程
+            pids[cmd_idx] = fork();
+            if (pids[cmd_idx] < 0) {
+                print_execution_error();
+                return 0;
+            }
+            else if (pids[cmd_idx] == 0) {
+                //子进程，设置输入输出
+                if (cmd_idx > 0) {
+                    //不是第一个子命令，输入重定向到前一个进程的fd[0]
+                    dup2(pipefds[cmd_idx - 1][0], STDIN_FILENO);
+                }
+                else if (cmd_idx < cmd_count - 1) {
+                    //不是最后一个命令，输出重定向到当前进程的fd[1]
+                    dup2(pipefds[cmd_idx][1], STDOUT_FILENO);
+                }
+
+                //关闭所有管道描述符
+                for (int j = 0; j < pipe_count; j++) {
+                    close(pipefds[j][0]);
+                    close(pipefds[j][1]);
+                }
+
+                //执行
+                if (execvp(current_tokens[0], current_tokens) < 0) {
+                    print_execution_error();
+                    exit(EXIT_FAILURE);
+                }
+            }
+            cmd_idx++;
+            cmd_start = i + 1;
+        }
+        
+    }
+    //父进程关闭所有管道
+    for (int i = 0;i < pipe_count; i++) {
+        close(pipefds[i][0]);
+        close(pipefds[i][1]);
+    }
+
+    //父进程等待子进程返回
+    for (int i = 0; i < cmd_count; i++) {
+        int status;
+        waitpid(pids[i], &status, 0);
+        if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+            print_execution_error();
+            return 0;
+        }
+    }
+
+    return 0;
+}
 
 int handle_tokens(char *tokens[], int token_count) {
     if (strcmp(tokens[0], "exit") == 0) {
@@ -204,34 +294,7 @@ int handle_tokens(char *tokens[], int token_count) {
         free(value);
         return 0;
     }
-    else {
-        int is_executable = find_executable(tokens[0]);
-        if (!is_executable) {
-            print_command_not_found();
-            return 0;
-        }
-        pid_t pid = fork();
-        if (pid < 0) {
-            print_execution_error();
-            return 0;
-        }
-        else if (pid == 0) {
-            //子进程，执行target
-            if (execvp(tokens[0], tokens) == -1) {
-                exit(EXIT_FAILURE);
-            }
-        }
-        else {
-            //父进程
-            int status;
-            wait(&status);
-            if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
-                print_execution_error();
-                return 0;
-            }
-        }
-        return 0;
-    }
+    return handle_external_cmd(tokens, token_count);
 }
 
 char *tokens[MAX_TOKENS];
@@ -263,7 +326,12 @@ int main() {
         //     printf("tokens[%d] = \"%s\"\n", i, tokens[i]);
         // }
 
-        handle_tokens(tokens, token_count);
+        if (check_tokens(tokens)) {
+            handle_tokens(tokens, token_count);
+        }
+        else {
+            print_invalid_syntax();
+        }
         
         free(row_prompt);
 
