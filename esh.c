@@ -189,15 +189,25 @@ int handle_external_cmd(char *tokens[], int token_count) {
     int cmd_idx = 0;
     int cmd_start = 0;
     char *current_tokens[MAX_TOKENS];
+    int redirect_fd = -1; //上次重定向的文件描述符
         
     for (int i = 0; i <= token_count; i++) {
         if (i == token_count || strcmp(tokens[i], "|") == 0) {
-            //构建当前子命令参数
-            int current_token_idx = cmd_start;
-            for (; current_token_idx < i; current_token_idx++) {
-                current_tokens[current_token_idx - cmd_start] = tokens[current_token_idx];
+            // 构建当前子命令参数
+            int current_token_count = 0;
+            int output_to_file = 0;
+            for (int j = cmd_start; j < i; j++) {
+                if (strcmp(tokens[j], ">") == 0) {
+                    if (tokens[j + 1] == NULL) {
+                        print_invalid_syntax();
+                        return 0;
+                    }
+                    output_to_file = 1;
+                    break;
+                }
+                current_tokens[current_token_count++] = tokens[j];
             }
-            current_tokens[current_token_idx - cmd_start] = NULL;
+            current_tokens[current_token_count] = NULL;
 
             //检查命令是否可执行
             if (!find_executable(current_tokens[0])) {
@@ -212,14 +222,36 @@ int handle_external_cmd(char *tokens[], int token_count) {
                 return 0;
             }
             else if (pids[cmd_idx] == 0) {
-                //子进程，设置输入输出
+                //子进程，设置输入
                 if (cmd_idx > 0) {
-                    //不是第一个子命令，输入重定向到前一个进程的fd[0]
-                    dup2(pipefds[cmd_idx - 1][0], STDIN_FILENO);
+                    if (redirect_fd >= 0) {
+                        // 如果上一个命令有重定向，从文件读取
+                        dup2(redirect_fd, STDIN_FILENO);
+                        close(redirect_fd);
+                    } else {
+                        // 从前一管道读取
+                        dup2(pipefds[cmd_idx - 1][0], STDIN_FILENO);
+                    }
                 }
-                else if (cmd_idx < cmd_count - 1) {
-                    //不是最后一个命令，输出重定向到当前进程的fd[1]
+
+                //设置输出
+                for (int j = cmd_start; j < i; j++) {
+                    if (strcmp(tokens[j], ">") == 0) {
+                        //如果当前子命令有重定向，输出需设置为文件
+                        redirect_fd = open(tokens[j + 1], O_CREAT | O_WRONLY | O_TRUNC, 0644);
+                        if (redirect_fd < 0) {
+                            print_execution_error();
+                            exit(EXIT_FAILURE);
+                        }
+                        dup2(redirect_fd, STDOUT_FILENO);
+                        close(redirect_fd);
+                        break;
+                    }
+                }
+                //如何没有重定向且非最后一个子命令，则输出当前管道
+                if (!output_to_file && i < token_count && strcmp(tokens[i], "|") == 0) {
                     dup2(pipefds[cmd_idx][1], STDOUT_FILENO);
+                    redirect_fd = -1;
                 }
 
                 //关闭所有管道描述符
@@ -234,8 +266,25 @@ int handle_external_cmd(char *tokens[], int token_count) {
                     exit(EXIT_FAILURE);
                 }
             }
+            
+            //父进程关闭管道
+            if (cmd_idx > 0 && redirect_fd < 0) {
+                close(pipefds[cmd_idx - 1][0]);
+            }
+            if (i < token_count && !output_to_file) {
+                close(pipefds[cmd_idx][1]);
+            }
+
             cmd_idx++;
             cmd_start = i + 1;
+            for (int j = i - 1; j >= cmd_start - 1; j--) {
+                if (j >= 0 && strcmp(tokens[j], ">") == 0) {
+                    redirect_fd = open(tokens[j + 1], O_RDONLY); // 为下一命令准备输入
+                    break;
+                } else {
+                    redirect_fd = -1;
+                }
+            }
         }
         
     }

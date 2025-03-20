@@ -1,8 +1,5 @@
 apple
-banana
-cherry
 apricot
-date
 apa
 apb
 ape
