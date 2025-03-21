@@ -1,4 +1,0 @@
-apple
-cherry
-date
-elderberry

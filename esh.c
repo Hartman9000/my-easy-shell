@@ -17,6 +17,8 @@
 
 #define MAX_TOKENS 1024
 #define MAX_PATH_LEN 1024
+#define MAX_RULES 128
+#define MAX_PARAMS 8
 
 void print_prompt() {
     printf("esh > ");
@@ -53,6 +55,13 @@ void print_blocked_syscall(char* syscall_name, int count, ...) {
 // 
 // You can add your own functions here
 //
+
+typedef struct {
+    char syscall_name[32];
+    int param_count;
+    int param_indices[MAX_PARAMS];
+    char param_values[MAX_PARAMS][128];
+} Rule;
 
 int tokenize(char *prompt, char *tokens[], int max_tokens) {
     int count = 0;
@@ -163,6 +172,69 @@ int check_tokens(char *tokens[]) {
     }
 
     return 1; // 语法合法
+}
+
+int parse_rules(const char *filename, Rule rules[]) {
+    FILE *file = fopen(filename, "r");
+    if (!file) {
+        perror("Failed to open rule file\n");
+        print_execution_error();
+        return -1;
+    }
+
+    char line[256];
+    int rule_count = 0;
+
+    while (fgets(line, sizeof(line), file)) {
+        line[strcspn(line, "\n")] = '\0';
+        if (strlen(line) == 0 || line[0] == '#') {
+            continue;
+        }
+        if (strncmp(line, "deny:", 5) != 0) {
+            printf("invalid rule format: %s\n", line);
+            continue;
+        }
+
+        //提取系统调用名和参数
+        char *syscall_name = strtok(line + 5, " ");
+
+        Rule rule;
+        strncpy(rule.syscall_name, syscall_name, sizeof(rule.syscall_name) - 1);
+        rule.param_count = 0;
+
+        char *param_condition = strtok(NULL, " ");
+        while (param_condition && rule.param_count < MAX_PARAMS) {
+            int idx;
+            char value[128];
+            if (sscanf(param_condition, "arg%d=%s", &idx, value) == 2) {
+                rule.param_indices[rule.param_count] = idx;
+                if (value[0] == '"') {
+                    strncpy(rule.param_values[rule.param_count], value + 1, sizeof(rule.param_values[0]) - 1);
+                    rule.param_values[rule.param_count][strcspn(rule.param_values[rule.param_count], "\"")] = '\0';
+                }
+                else {
+                    strncpy(rule.param_values[rule.param_count], value, sizeof(rule.param_values[0]) - 1);
+                }
+                rule.param_count ++;
+            } else {
+                print_execution_error();
+                break;
+            }
+            param_condition = strtok(NULL, " ");
+        }
+        rules[rule_count++] = rule;
+    }
+    fclose(file);
+    return rule_count;
+}
+
+void print_rules(Rule rules[], int count) {
+    for (int i = 0; i < count; i++) {
+        printf("Rule %d: syscall=%s, param_count=%d\n", i, rules[i].syscall_name, rules[i].param_count);
+        for (int j = 0; j < rules[i].param_count; j++) {
+            printf("  arg%d=%s\n", rules[i].param_indices[j], rules[i].param_values[j]);
+        }
+    }
 }
 
 int handle_external_cmd(char *tokens[], int token_count) {
@@ -293,7 +365,6 @@ int handle_external_cmd(char *tokens[], int token_count) {
     return 0;
 }
 
-
 int handle_tokens(char *tokens[], int token_count) {
     if (strcmp(tokens[0], "exit") == 0) {
         cmd_exit();
@@ -373,4 +444,14 @@ int main() {
 
         // break;
     }
+    // Rule rules[MAX_RULES];
+    // int rule_count = parse_rules("rule.txt", rules);
+    // if (rule_count < 0) {
+    //     fprintf(stderr, "Failed to parse rules.\n");
+    //     return 1;
+    // }
+    // printf("Parsed %d rules:\n", rule_count);
+    // print_rules(rules, rule_count);
+
+    // return 0;
 }
