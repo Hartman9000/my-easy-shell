@@ -1,0 +1,8 @@
+# 禁止所有fork调用
+deny:fork
+
+# 禁止打开特定文件
+deny:open arg0="/etc/passwd"
+
+# 禁止向标准输出写入
+deny:write arg0=1

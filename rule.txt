@@ -1,5 +1,0 @@
-deny:fork
-deny:open
-deny:write arg0=1
-deny:execve arg0="./a.out"
-deny:read arg0=1 arg1=2
