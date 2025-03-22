@@ -1,8 +1,0 @@
-# 禁止执行特定程序
-deny:execve arg0="/bin/ls"
-
-# 禁止创建特定目录
-deny:mkdir arg0="secret_folder"
-
-# 禁止chmod操作特定文件
-deny:chmod arg0="important.txt"

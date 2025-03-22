@@ -3,6 +3,7 @@
 #include <sys/ptrace.h>
 #include <sys/reg.h>
 #include <sys/user.h>
+#include <linux/ptrace.h>
 #include <errno.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -71,10 +72,10 @@ typedef struct Rule {
 Rule *head_rule = NULL;
 
 typedef enum {
+    ARG_TYPE_OTHER,
     ARG_TYPE_INT,
     ARG_TYPE_STRING,
-    ARG_TYPE_POINTER,
-    ARG_TYPE_OTHER
+    ARG_TYPE_POINTER
 } arg_type_t;
 
 typedef struct {
@@ -86,14 +87,14 @@ typedef struct {
 // 预定义支持的系统调用信息
 syscall_info_t syscall_infos[SYSCALLS_NUM] = {
     {"read",        0, {ARG_TYPE_INT, ARG_TYPE_POINTER, ARG_TYPE_INT}},       // fd, buf, count
-    {"write",       1, {ARG_TYPE_INT, ARG_TYPE_POINTER, ARG_TYPE_INT}},       // fd, buf, count
+    {"write",       1, {ARG_TYPE_INT, ARG_TYPE_STRING, ARG_TYPE_INT}},       // fd, buf, count
     {"open",        2, {ARG_TYPE_STRING, ARG_TYPE_INT, ARG_TYPE_INT}},        // filename, flags, mode
     {"mmap",        9, {ARG_TYPE_POINTER, ARG_TYPE_INT, ARG_TYPE_INT, ARG_TYPE_INT, ARG_TYPE_INT, ARG_TYPE_INT}}, // addr, length, prot, flags, fd, offset
     {"pipe",       22, {ARG_TYPE_POINTER}},                                   // filedes
-    {"sched_yield",24, {ARG_TYPE_OTHER}},                                     // 无参数
+    {"sched_yield",24, {0}},                                                  // 无参数
     {"dup",        32, {ARG_TYPE_INT}},                                       // oldfd
     {"clone",      56, {ARG_TYPE_INT, ARG_TYPE_POINTER, ARG_TYPE_POINTER, ARG_TYPE_POINTER, ARG_TYPE_INT}}, // flags, stack, parent_tid, child_tid, tls
-    {"fork",       57, {ARG_TYPE_OTHER}},                                     // 无参数
+    {"fork",       57, {0}},                                                  // 无参数
     {"execve",     59, {ARG_TYPE_STRING, ARG_TYPE_POINTER, ARG_TYPE_POINTER}}, // filename, argv, envp
     {"mkdir",      83, {ARG_TYPE_STRING, ARG_TYPE_INT}},                      // pathname, mode
     {"chmod",      90, {ARG_TYPE_STRING, ARG_TYPE_INT}}                       // pathname, mode
@@ -350,6 +351,7 @@ int match_rule(pid_t child_pid, Rule *rule, long syscall_num, struct user_regs_s
     
     // 检查每个参数条件，必须全部匹配
     for (int i = 0; i < rule->param_count; i++) {
+        //遍历每个参数
         int param_idx = rule->param_indices[i];
         if (param_idx < 0 || param_idx >= 6) continue;
         
@@ -462,7 +464,8 @@ void handle_blocked_syscall(pid_t child_pid, Rule *rule, long syscall_num, struc
     };
     
     // 确定要收集的参数个数 (rule->param_count或最多6个)
-    int param_count = rule->param_count > 0 ? rule->param_count : 0;
+    int param_count = 0;
+    while (syscall_infos[syscall_index].arg_types[param_count] != 0) param_count++;
     
     // 准备参数字符串数组
     char *param_strings[MAX_PARAMS] = {NULL};
@@ -470,18 +473,7 @@ void handle_blocked_syscall(pid_t child_pid, Rule *rule, long syscall_num, struc
     // 收集参数值并格式化
     if (param_count > 0) {
         for (int i = 0; i < param_count; i++) {
-            int param_idx = rule->param_indices[i];
-            if (param_idx >= 0 && param_idx < 6) {
-                arg_type_t arg_type = ARG_TYPE_OTHER; // 默认为其他类型
-                
-                // 如果在系统调用表中找到，则使用预定义的类型
-                if (syscall_index != -1 && param_idx < 6) {
-                    arg_type = syscall_infos[syscall_index].arg_types[param_idx];
-                }
-                
-                // 格式化参数值
-                param_strings[i] = format_param_value(child_pid, args[param_idx], arg_type);
-            }
+                param_strings[i] = format_param_value(child_pid, args[i], syscall_infos[syscall_index].arg_types[i]);
         }
     }
     
@@ -502,6 +494,40 @@ void handle_blocked_syscall(pid_t child_pid, Rule *rule, long syscall_num, struc
     }
 }
 
+void show_syscall(int syscall_idx,pid_t child_pid, struct user_regs_struct *regs) {
+    if (syscall_idx >= 0) {
+        // 获取系统调用的参数值
+        unsigned long long args[6] = {
+            regs->rdi, regs->rsi, regs->rdx, 
+            regs->r10, regs->r8, regs->r9
+        };
+        // 如果系统调用被支持，打印调试信息
+        printf("Detected supported syscall: %s\n", syscall_infos[syscall_idx].name);
+        // 打印系统调用的参数
+        for (int i = 0; i < 6; i++) {
+            arg_type_t arg_type = syscall_infos[syscall_idx].arg_types[i];
+            switch (arg_type) {
+                case ARG_TYPE_STRING: {
+                    char *param_str = read_string_from_process(child_pid, args[i]);
+                    printf("  arg%d: \"%s\" (string)\n", i, param_str ? param_str : "(null)");
+                    free(param_str);
+                    break;
+                }
+                case ARG_TYPE_INT:
+                    printf("  arg%d: %lld (int)\n", i, args[i]);
+                    break;
+                case ARG_TYPE_POINTER:
+                    printf("  arg%d: 0x%llx (pointer)\n", i, args[i]);
+                    break;
+                case ARG_TYPE_OTHER:
+                default:
+                    printf("  arg%d: 0x%llx (other/unknown)\n", i, args[i]);
+                    break;
+            }
+        }
+    }
+}
+
 void trace_child(pid_t child_pid, Rule *head_rule) {
     int status;
     struct user_regs_struct regs;
@@ -519,12 +545,12 @@ void trace_child(pid_t child_pid, Rule *head_rule) {
         }
         
         // 检查是否是 SIGSTOP 导致的停顿
-        if (WSTOPSIG(status) == SIGSTOP && !in_syscall) {
-            // 忽略初始的 SIGSTOP
+        if (WSTOPSIG(status) == SIGSTOP) {
+            ptrace(PTRACE_SETOPTIONS, child_pid, 0, PTRACE_O_TRACESYSGOOD); // 设置TRACESYSGOOD选项
             ptrace(PTRACE_SYSCALL, child_pid, NULL, NULL);
             continue;
         }
-        
+
         // 处理系统调用
         if (WSTOPSIG(status) == (SIGTRAP | 0x80)) {
             if (!in_syscall) {
@@ -533,29 +559,28 @@ void trace_child(pid_t child_pid, Rule *head_rule) {
                 long syscall_num = regs.orig_rax;
                 
                 // 检查系统调用是否存在于我们支持的列表中
-                int syscall_supported = 0;
+                int syscall_idx = -1; //当前系统调用在调用表中的索引
                 for (int i = 0; i < SYSCALLS_NUM; i++) {
                     if (syscall_infos[i].syscall_number == syscall_num) {
-                        syscall_supported = 1;
+                        syscall_idx = i;
                         break;
                     }
                 }
+    
+                //调试内容
+                // if (syscall_idx >=0) {
+                //     printf("in_syscall:%d\n",in_syscall);
+                //     printf("WSTOPSIG(status):%u\n", WSTOPSIG(status));
+                //     printf("SIGTRAP | 0x80:%u\n", SIGTRAP | 0x80);
+                //     show_syscall(syscall_idx, child_pid, &regs);
+                // }
                 
-                if (syscall_supported) {
+                if (syscall_idx >= 0) {
                     // 检查系统调用是否被规则禁止
                     Rule *rule = head_rule;
                     while (rule != NULL) {
-                        // 检查系统调用名称是否匹配
-                        int syscall_matched = 0;
-                        for (int i = 0; i < SYSCALLS_NUM; i++) {
-                            if (syscall_infos[i].syscall_number == syscall_num && 
-                                strcmp(syscall_infos[i].name, rule->syscall_name) == 0) {
-                                syscall_matched = 1;
-                                break;
-                            }
-                        }
-                        
-                        if (syscall_matched) {
+                        // 检查系统调用名称是否与当前规则匹配
+                        if (strcmp(syscall_infos[syscall_idx].name, rule->syscall_name) == 0) {
                             // 如果没有参数条件或参数条件匹配，则阻止系统调用
                             if (rule->param_count == 0 || 
                                 match_rule(child_pid, rule, syscall_num, &regs)) {
@@ -570,12 +595,10 @@ void trace_child(pid_t child_pid, Rule *head_rule) {
                         rule = rule->next;
                     }
                 }
-                in_syscall = 1;
-            } else {
-                // 系统调用出口点
-                in_syscall = 0;
             }
+            in_syscall = in_syscall == 1 ? 0 : 1;
         }
+        
         
         // 继续执行直到下一个系统调用
         ptrace(PTRACE_SYSCALL, child_pid, NULL, NULL);
@@ -691,7 +714,6 @@ int handle_external_cmd(char *tokens[], int token_count, Rule *head_rule) {
                 close(pipefds[cmd_idx][1]); // 关闭当前管道的写端
             }
             
-            //父进程跟踪子进程
             if (head_rule != NULL) {
                 trace_child(pids[cmd_idx], head_rule);
             }

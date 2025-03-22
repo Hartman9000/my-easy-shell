@@ -1,8 +1,0 @@
-# 禁止读取文件描述符为0的输入
-deny:read arg0=0
-
-# 禁止使用pipe
-deny:pipe
-
-# 禁止克隆进程
-deny:clone
