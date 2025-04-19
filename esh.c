@@ -629,6 +629,7 @@ int handle_external_cmd(char *tokens[], int token_count, Rule *head_rule) {
     int cmd_idx = 0;
     int cmd_start = 0;
     char *current_tokens[MAX_TOKENS];
+    int prev_cmd_failed = 0;
     
     for (int i = 0; i <= token_count; i++) {
         if (i == token_count || strcmp(tokens[i], "|") == 0) {
@@ -649,20 +650,29 @@ int handle_external_cmd(char *tokens[], int token_count, Rule *head_rule) {
             // 检查重定向语法
             if (redirect_pos != -1 && (redirect_pos + 1 >= i)) {
                 print_invalid_syntax();
-                return 0;
+                prev_cmd_failed = 1;
+                cmd_idx++;
+                cmd_start = i + 1;
+                continue;
             }
             
             // 检查命令是否可执行
             if (current_token_count == 0 || !find_executable(current_tokens[0])) {
                 print_command_not_found();
-                return 0;
+                prev_cmd_failed = 1;
+                cmd_idx++;
+                cmd_start = i + 1;
+                continue;
             }
             
             // fork子进程
             pids[cmd_idx] = fork();
             if (pids[cmd_idx] < 0) {
                 print_execution_error();
-                return 0;
+                prev_cmd_failed = 1;
+                cmd_idx++;
+                cmd_start = i + 1;
+                continue;
             }
             else if (pids[cmd_idx] == 0) {
                 // 子进程
@@ -673,8 +683,12 @@ int handle_external_cmd(char *tokens[], int token_count, Rule *head_rule) {
                     kill(getpid(), SIGSTOP);
                 }
                 
-                // 设置输入: 如果不是第一个命令，从前一个管道读取
-                if (cmd_idx > 0) {
+                // 设置输入: 如果前一个命令失败，关闭标准输入，否则从管道输入
+                if (prev_cmd_failed) {
+                    close(STDIN_FILENO);
+                    open("/dev/null", O_RDONLY);
+                }
+                else if (cmd_idx > 0) {
                     dup2(pipefds[cmd_idx - 1][0], STDIN_FILENO);
                 }
                 
@@ -707,16 +721,10 @@ int handle_external_cmd(char *tokens[], int token_count, Rule *head_rule) {
             }
             
             // 父进程处理管道
-            if (cmd_idx > 0) {
-                close(pipefds[cmd_idx - 1][0]); // 关闭前一个管道的读端
-            }
-            if (cmd_idx < pipe_count) {
-                close(pipefds[cmd_idx][1]); // 关闭当前管道的写端
-            }
+            if (cmd_idx > 0) close(pipefds[cmd_idx - 1][0]); // 关闭前一个管道的读端
+            if (cmd_idx < pipe_count) close(pipefds[cmd_idx][1]); // 关闭当前管道的写端
             
-            if (head_rule != NULL) {
-                trace_child(pids[cmd_idx], head_rule);
-            }
+            if (head_rule != NULL) trace_child(pids[cmd_idx], head_rule);
 
             cmd_idx++;
             cmd_start = i + 1;
@@ -735,7 +743,7 @@ int handle_external_cmd(char *tokens[], int token_count, Rule *head_rule) {
         waitpid(pids[i], &status, 0);
         if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
             print_execution_error();
-            return 0;
+            continue;
         }
     }
     

@@ -1,5 +1,9 @@
-apple
-banana
-cherry
-date
-elderberry
+Makefile
+a
+a.out
+a.txt
+conf
+esh
+esh.c
+hello.c
+rule.txt
