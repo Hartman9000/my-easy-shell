@@ -605,7 +605,66 @@ void trace_child(pid_t child_pid, Rule *head_rule) {
     }
 }
 
-int handle_external_cmd(char *tokens[], int token_count, Rule *head_rule) {
+int is_builtin_cmd(char *cmd) {
+    return (strcmp(cmd, "exit") == 0 || 
+            strcmp(cmd, "cd") == 0 || 
+            strcmp(cmd, "export") == 0);
+}
+
+// 执行内置命令的通用函数，可同时用于主进程和子进程
+// in_child: 1表示在子进程中执行，0表示在主进程中执行
+int exec_builtin_cmd(char *tokens[], int token_count, int in_child) {
+    if (strcmp(tokens[0], "exit") == 0) {
+        if (in_child) {
+            exit(0);  // 子进程直接退出
+        } else {
+            cmd_exit();  // 主进程调用cmd_exit
+        }
+        return 1;
+    }
+    else if (strcmp(tokens[0], "cd") == 0) {
+        if (token_count == 1) {
+            print_invalid_syntax();
+            if (in_child) exit(1);
+            return 0;
+        }
+        char *path = tokens[1];
+        cmd_cd(path);
+        if (in_child) exit(0);
+        return 1;
+    }
+    else if (strcmp(tokens[0], "export") == 0) {
+        if (token_count == 1) {
+            print_invalid_syntax();
+            if (in_child) exit(1);
+            return 0;
+        }
+        char *equal = strchr(tokens[1], '=');
+        char *name = NULL;
+        char *value = NULL;
+        if (equal == NULL) {
+            print_invalid_syntax();
+            if (in_child) exit(1);
+            return 0;
+        }
+        else {
+            size_t name_len = equal - tokens[1];
+            name = strndup(tokens[1], name_len);
+            value = strdup(equal + 1);
+        }
+        cmd_export(name, value);
+        free(name);
+        free(value);
+        if (in_child) exit(0);
+        return 1;
+    }
+    
+    // 不是内置命令
+    if (in_child) exit(1);  // 子进程出错退出
+    return 0;               // 主进程返回0表示不是内置命令
+}
+
+int handle_cmd(char *tokens[], int token_count, Rule *head_rule) {
     // 计算管道数和子命令数
     int pipe_count = 0;
     for (int i = 0; i < token_count; i++) {
@@ -655,9 +714,11 @@ int handle_external_cmd(char *tokens[], int token_count, Rule *head_rule) {
                 cmd_start = i + 1;
                 continue;
             }
+
+            int is_builtin = is_builtin_cmd(current_tokens[0]);
             
             // 检查命令是否可执行
-            if (current_token_count == 0 || !find_executable(current_tokens[0])) {
+            if (!is_builtin && (current_token_count == 0 || !find_executable(current_tokens[0]))) {
                 print_command_not_found();
                 prev_cmd_failed = 1;
                 cmd_idx++;
@@ -678,18 +739,20 @@ int handle_external_cmd(char *tokens[], int token_count, Rule *head_rule) {
                 // 子进程
 
                 //启用ptrace
-                if (head_rule != NULL) {
+                if (head_rule != NULL && !is_builtin) {
                     ptrace(PTRACE_TRACEME, 0, NULL, NULL);
                     kill(getpid(), SIGSTOP);
                 }
                 
                 // 设置输入: 如果前一个命令失败，关闭标准输入，否则从管道输入
-                if (prev_cmd_failed) {
-                    close(STDIN_FILENO);
-                    open("/dev/null", O_RDONLY);
-                }
-                else if (cmd_idx > 0) {
-                    dup2(pipefds[cmd_idx - 1][0], STDIN_FILENO);
+                if (cmd_idx > 0) {
+                    if (prev_cmd_failed) {
+                        close(STDIN_FILENO);
+                        open("/dev/null", O_RDONLY);
+                    }
+                    else {
+                        dup2(pipefds[cmd_idx - 1][0], STDIN_FILENO);
+                    }
                 }
                 
                 // 设置输出
@@ -698,7 +761,7 @@ int handle_external_cmd(char *tokens[], int token_count, Rule *head_rule) {
                     int fd = open(tokens[redirect_pos + 1], O_CREAT | O_WRONLY | O_TRUNC, 0644);
                     if (fd < 0) {
                         print_execution_error();
-                        exit(EXIT_FAILURE);
+                        exit(0);
                     }
                     dup2(fd, STDOUT_FILENO);
                     close(fd);
@@ -714,9 +777,13 @@ int handle_external_cmd(char *tokens[], int token_count, Rule *head_rule) {
                 }
                 
                 // 执行
-                if (execvp(current_tokens[0], current_tokens) < 0) {
+                if (is_builtin) {
+                    exec_builtin_cmd(current_tokens, current_token_count, 1);
+                    exit(1);
+                }
+                else if (execvp(current_tokens[0], current_tokens) < 0) {
                     print_execution_error();
-                    exit(EXIT_FAILURE);
+                    exit(0);
                 }
             }
             
@@ -751,42 +818,7 @@ int handle_external_cmd(char *tokens[], int token_count, Rule *head_rule) {
 }
 
 int handle_tokens(char *tokens[], int token_count) {
-    if (strcmp(tokens[0], "exit") == 0) {
-        cmd_exit();
-    }
-    else if (strcmp(tokens[0], "cd") == 0) {
-        if (token_count == 1) {
-            print_invalid_syntax();
-            return 0;
-        }
-        char *path = tokens[1];
-        cmd_cd(path);
-        return 0;
-    }
-    else if (strcmp(tokens[0], "export") == 0) {
-        if (token_count == 1) {
-            print_invalid_syntax();
-            return 0;
-        }
-        char *equal = strchr(tokens[1], '=');
-        char *name = NULL;
-        char *value = NULL;
-        if (equal == NULL) {
-            print_invalid_syntax();
-            return 0;
-        }
-        else {
-            size_t name_len = equal - tokens[1];
-            name = strndup(tokens[1], name_len);
-            value = strdup(equal + 1);
-        }
-        // printf("name:%s      value:%s\n",name,value);
-        cmd_export(name, value);
-        free(name);
-        free(value);
-        return 0;
-    }
-    else if (strcmp(tokens[0], "sandbox") == 0) {
+    if (strcmp(tokens[0], "sandbox") == 0) {
         if (token_count < 3) {
             print_invalid_syntax();
             return 0;
@@ -803,14 +835,33 @@ int handle_tokens(char *tokens[], int token_count) {
         }
         
         // 执行命令
-        int result = handle_external_cmd(tokens + 2, token_count - 2, head_rule);
+        int result = handle_cmd(tokens + 2, token_count - 2, head_rule);
         
         // 清理规则
         free_rules(&head_rule);
         return result;
     }
+
+    // 检查第一个命令是否为内置命令
+    if (is_builtin_cmd(tokens[0])) {
+        // 检查是否存在管道符号
+        int has_pipe = 0;
+        for (int i = 1; i < token_count; i++) {
+            if (strcmp(tokens[i], "|") == 0) {
+                has_pipe = 1;
+                break;
+            }
+        }
+        if (has_pipe) {
+            // 有管道，使用handle_cmd处理
+            return handle_cmd(tokens, token_count, NULL);
+        } else {
+            // 无管道，直接在主进程中执行内置命令
+            return exec_builtin_cmd(tokens, token_count, 0);
+        }
+    }
     
-    return handle_external_cmd(tokens, token_count, NULL);
+    return handle_cmd(tokens, token_count, NULL);
 }
 
 char *tokens[MAX_TOKENS];
@@ -824,7 +875,7 @@ int main() {
     setenv("PWD", cwd, 1);
     setenv("OLDPWD", cwd, 1);
     setenv("LANG", "en_US.UTF-8", 1);
-    setenv("ESH_VERSION", "alpha", 1);
+    setenv("ESH_VERSION", "alpha1.0", 1);
 
     while(1) {
         print_prompt();
@@ -832,6 +883,7 @@ int main() {
         char *row_prompt = NULL;
         size_t prompt_buffer_size = 0;
         ssize_t read = getline(&row_prompt, &prompt_buffer_size, stdin);
+        if (read == -1) return 0;
         if (row_prompt[0] == '\n') continue;
         row_prompt[read - 1] = '\0';
         
