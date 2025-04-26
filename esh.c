@@ -885,13 +885,30 @@ int handle_cmd(char *tokens[], int token_count, Rule *head_rule) {
     }
     
     // 父进程等待子进程返回
+    int any_cmd_failed = 0;
     for (int i = 0; i < cmd_count; i++) {
         int status;
         waitpid(pids[i], &status, 0);
-        if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
-            print_execution_error();
-            continue;
+        
+        // 检查进程是否异常终止
+        if (WIFSIGNALED(status)) {
+            // 如果是不是"管道破裂"导致的终止，打印错误
+            if (WTERMSIG(status) != SIGPIPE) {
+                any_cmd_failed = 1;
+            } else {
+                // 如果是管道破裂(SIGPIPE)，也算作错误
+                any_cmd_failed = 1;
+            }
         }
+        // 检查进程是否正常退出但返回错误码
+        else if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+            any_cmd_failed = 1;
+        }
+    }
+    
+    // 如果有任何命令失败，打印执行错误
+    if (any_cmd_failed) {
+        print_execution_error();
     }
     
     return 0;
@@ -955,7 +972,7 @@ int main() {
     setenv("PWD", cwd, 1);
     setenv("OLDPWD", cwd, 1);
     setenv("LANG", "en_US.UTF-8", 1);
-    setenv("ESH_VERSION", "alpha1.0", 1);
+    setenv("ESH_VERSION", "alpha", 1);
 
     while(1) {
         print_prompt();

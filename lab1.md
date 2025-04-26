@@ -1,0 +1,346 @@
+# 实现一个简单的 Shell
+
+**截止时间**：2025年5月18日 23:59 (extended)
+
+> **提交内容**：
+> 
+> 1. **代码源文件** `esh.c`：注意代码中应有必要的注释
+> 2. **实验报告** `学号.pdf`：简要描述实验中遇到的关键问题及解决方案、印象最深的 bugs、或者额外实现的功能等即可 (1～2 页)。
+> 
+> **提交方式**：请参考[实验页面](https://gist.nju.edu.cn/course-os/labs.html)的具体说明
+> 
+> ```
+> # 提交代码
+> $ make submit
+> # 提交报告
+> $ make report
+> # 获取得分
+> $ make score
+> ```
+> 
+> *提交冷却时间 2 小时
+
+Shell 是计算机中运行的一个程序，其提供了用户与操作系统内核交互的接口，通过解释用户输入 (prompts) 来执行相关操作，如管理文件、运行程序和控制进程等。在本实验中，我们将实现一个简单的命令行 Shell，以此来熟悉操作系统的进程管理、以及基本的系统调用。
+
+运行如下命令下载本实验的框架代码 (不需要注册 NJU GitLab 账号)：
+
+```
+$ git clone https://git.nju.edu.cn/oslab/esh-2025spring.git
+$ cd esh-2025spring
+```
+
+## [](https://gist.nju.edu.cn/course-os/docs/lab/lab1.html#%EF%B8%8F-%E5%AE%9E%E9%AA%8C%E5%86%85%E5%AE%B9)🗒️ 实验内容
+
+在本次实验中，我们需要实现一个叫做 esh (Easy Shell) 的简化版 Shell。esh 运行后将不断接受用户输入并进行处理，直到退出为止，即类似如下的使用形式：
+
+```
+$ make
+$ ./esh
+esh > ls
+esh > 
+```
+
+本实验中所实现的 esh 需要具备以下功能：
+
+### [](https://gist.nju.edu.cn/course-os/docs/lab/lab1.html#1-%E5%86%85%E7%BD%AE%E5%91%BD%E4%BB%A4-builtin-commands)1. 内置命令 (builtin commands)
+
+[内置命令](https://www.gnu.org/software/bash/manual/html_node/Shell-Builtin-Commands.html)是指由 Shell 本身实现的一些命令或功能 (而不是由 Shell 去调用其它外部程序)。 esh 需要支持以下几个内置命令：
+
+- `exit`：退出 Easy Shell。
+- `cd [directory]`：接收一个参数，用于切换当前工作目录。若接收的输入为 `cd ~`，则切换到主目录。
+- `export name[=value]`：临时将环境变量 `name` 的值设置为 `value`。该修改应立即生效，并将影响后续命令的执行。
+
+esh 在启动后的环境变量应该仅包括以下几项 (可以使用**外部命令** `env` 打印环境变量信息)：
+
+```
+esh > env
+PATH=/bin                   # 查找可执行文件的目录列表 (多个目录以 : 分隔)
+HOME=[current directory]    # 主目录
+PWD=[current directory]     # 当前工作目录
+OLDPWD=[current directory]  # 上一次工作目录
+LANG=en_US.UTF-8            # 语言和字符编码设置
+ESH_VERSION=[some value]    # ESH 的版本号
+esh > 
+```
+
+其中，`PATH` 的默认值应为 `/bin` (注意这里 `/bin` 后面没有 `/`)；目录 `HOME`、`PWD` 和 `OLDPWD` 默认值应为当前所处目录的绝对路径 (例如，`/home/user/os-lab1`)；`ESH_VERSION` 可自行决定版本号格式。
+
+内置命令如果命令格式不正确 (例如，`cd`、`export` 后面没有参数)，esh 需打印 `Invalid Syntax` 错误信息。
+
+### [](https://gist.nju.edu.cn/course-os/docs/lab/lab1.html#2-%E6%89%A7%E8%A1%8C%E5%A4%96%E9%83%A8%E5%91%BD%E4%BB%A4)2. 执行外部命令
+
+esh 需要能执行外部的可执行文件，包括执行系统中的某个 GNU Core Utility (例如 `ls`，`cat`，`wc`，`sort` 等，其路径位于 `/bin`)、或者某个自己编写的程序 (例如 `./a.out` 等)。
+
+如果找不到可执行文件 (命令不存在)，esh 需打印 `Command Not Found` 错误信息；如果外部命令执行出错 (即返回值不是 0)，esh 需打印 `Execution Error` 错误信息。
+
+### [](https://gist.nju.edu.cn/course-os/docs/lab/lab1.html#3-%E7%AE%A1%E9%81%93-pipe)3. 管道 (pipe)
+
+管道 `|` 可用来连接多个命令 (包括)，将上一个命令的输出作为下一个命令的输入。例如，`ls | wc -l` 将通过程序 `ls` 列出当前目录下的文件，并将此作为程序 `wc` 的输入，用于进一步统计文件的数量。
+
+esh 需要能支持任意多个命令通过管道进行连接。如果出现两个连续的 `|` 符号时可认为不符合语法规范 (两个 `|` 中间可能有空格，例如 `| |`)，打印 `Invalid Syntax` 错误信息。 **对于管道中的每一个命令**，如果其不存在、或执行出错，esh 都需要打印 `Command Not Found` 或 `Execution Error` 错误信息。
+
+### [](https://gist.nju.edu.cn/course-os/docs/lab/lab1.html#4-%E9%87%8D%E5%AE%9A%E5%90%91-redirection)4. 重定向 (redirection)
+
+esh 可通过 `>` 来将某个命令的标准输出 (stdout) 重定向到某个文件中。例如，对于 `cmd > file_path`，若 `file_path` 存在，则清空文件内容然后写入；若不存在则新建文件写入。
+
+类似地，如果命令不存在、或执行出错，esh 需要打印 `Command Not Found` 或 `Execution Error` 错误信息。 在本次实验中，我们只需要让 esh 支持最基础的 `>` 重定向即可，其它包括 `<` 和 `>>` 在内的重定向符可简单视为 `Invalid Syntax` 错误。
+
+### [](https://gist.nju.edu.cn/course-os/docs/lab/lab1.html#5-%E6%B2%99%E7%9B%92%E6%89%A7%E8%A1%8C)5. 沙盒执行
+
+为了防止 “恶意” 程序的危害，esh 需提供一个 `sandbox` 命令来在受限的系统调用下执行某个可执行文件：
+
+```
+esh > sandbox [rule] [cmd]
+# 例如，以受限方式执行 ls -l 或者 ./a.out | cat
+esh > sandbox rule.txt ls -l
+esh > sandbox rule.txt ./a.out | cat
+```
+
+其中，`cmd` 是 esh 支持的某个命令，`rule` 是一个纯文本规则文件，用于描述当前系统调用的限制规则。 此时，如果 `cmd` 执行过程中 (包括其创建的所有子进程) 调用了一个被禁止的系统调用，esh 需立即终止其运行 (**注意此时被禁止的系统调用不应被执行**)，并打印 `Blocked Syscall` 错误信息。
+
+`sandbox` 按一个简单的黑名单模式来工作，即默认允许所有的系统调用执行，只有明确匹配 `deny` 规则的才会被禁止。相应地，规则文件中每一行代表一个具体的 `deny` 规则 (空白行忽略)：
+
+```
+deny:[syscall name] [parameter value]
+```
+
+其中，`[syscall name]` 是被禁止的 Linux 系统调用名称，`[parameter value]` 进一步指定仅禁止该系统调用的某个参数取值，以形如 `argN=...` 的方式表示 (这里用 `argN` 表示第 `N` 个参数，从 0 开始编号)。若没有提供 `[parameter value]`，则默认禁止所有可能的输入参数取值。例如：
+
+- 不提供参数：
+    
+    ```
+    deny:fork   # 禁止所有 fork 调用
+    deny:open   # 禁止所有 open 调用
+    ```
+    
+- 提供参数：
+    
+    ```
+    deny:write arg0=1 arg1="abc"  # 仅禁止向文件描述符为 1 的文件 (stdout by default) 写入 "abc"（同时满足）
+    deny:open arg0="/etc/passwd"  # 仅禁止 open 特定文件
+    deny:execve arg0="./a.out"    # 仅禁止执行特定可执行文件
+    ```
+    
+    为简化规则设计，规则文件不需要支持通配符、正则表达式等灵活的规则表示；并且可以假设同一个系统调用名称只会在规则文件中出现一次 (即按顺序扫描规则文件，找到第一个匹配规则时就可停止)。
+    
+
+在本次实验中，`sandbox` 仅需要支持对以下系统调用的阻塞即可，[这里](https://filippo.io/linux-syscall-table/)可以查看具体系统调用的参数信息（如果你使用的是 32 位系统或其他架构的设备，系统调用号会不同，请自行查找相关信息用于本地调试，**提交请时使用 x86-64 的系统调用号**）：
+
+```
+// syscall number (Linux x86-64) and syscall name
+0 read
+1 write
+2 open
+9 mmap 
+22 pipe
+24 sched_yield
+32 dup
+56 clone
+57 fork
+59 execve
+83 mkdir
+90 chmod
+```
+
+### [](https://gist.nju.edu.cn/course-os/docs/lab/lab1.html#6-%E9%94%99%E8%AF%AF%E4%BF%A1%E6%81%AF%E8%BE%93%E5%87%BA)6. 错误信息输出
+
+在 esh 执行过程中遇到错误时，需要**由 esh 主进程**调用框架代码中的如下函数打印错误信息 (**不要**自己编写 `printf()` 或 `perror()` 打印错误信息)：
+
+- **命令格式错误** `Invalid Syntax`：对于接收不合法的内部命令参数的情况 (例如，`cd` 或 `ls | | cat`)，使用 `print_invalid_syntax()` 打印错误信息；
+- **命令未找到** `Command Not Found`：对于接收不存在的内部或外部命令的情况 (例如，`esh 1`)，使用 `print_command_not_found()` 打印错误信息；
+- **命令执行失败** `Execution Error`：对于命令执行失败的情况 (即进程返回值不等于 0)，使用 `print_execution_error()` 打印错误信息；
+- **系统调用阻塞** `Blocked Syscall`：对于检测到需阻塞系统调用的情况，使用 `print_blocked_syscall()` 打印错误信息 (注意需要将系统调用名称及其当前参数取值传递给该函数)。
+
+### [](https://gist.nju.edu.cn/course-os/docs/lab/lab1.html#%E5%85%B6%E5%AE%83%E8%AF%B4%E6%98%8E)其它说明
+
+在实现上述 esh 的过程中，你可能会用到以下一些系统调用。关于这些系统调用或 C 标准库等 API 的说明，可以查看 [Linux man pages](https://man7.org/linux/man-pages/index.html) 或询问 AI：
+
+- 用于进程创建的 `fork()` 和 `execve()` (或 `exec` 系列函数)，也可以使用 POSIX 提供的 `posix_spawn()` 等
+- 用于进程结束的 `exit()` 等
+- 用于等待进程状态改变的 `wait()` 和 `waitpid()` 等
+- 用于观察和控制另一个进程执行的 `ptrace()` 等
+- 用于操作文件描述符的 `open()`、`close()` 和 `dup()` 等
+- 用于改变当前工作目录的 `chdir()` 等
+- 用于修改环境变量的 `setenv()` 和 `putenv()` 等
+
+> C 标准库中有一个叫做 [`system()`](https://man7.org/linux/man-pages/man3/system.3.html) 的 API 可以用于执行一个给定的 Shell 命令；Linux 还提供一个叫做 [`seccomp()`](https://man7.org/linux/man-pages/man2/seccomp.2.html) 的系统调用来限制进程可使用的系统调用 ([`libseccomp`](https://github.com/seccomp/libseccomp) 提供了一个更易用的库)。当然，在本实验中你不能使用这些 APIs。
+
+对 Shell 功能如有不清楚的，可以参考自己系统 Shell 的对应执行行为 **(但注意 esh 和一般 Shell 的规格说明存在不同)**。[Bash Reference Manual](https://www.gnu.org/software/bash/manual/html_node/index.html) 给出了 bash 这一常见 Shell 的简要功能描述，可供参考。
+
+### [](https://gist.nju.edu.cn/course-os/docs/lab/lab1.html#%E4%B8%80%E4%BA%9B%E9%9C%80%E8%A6%81%E6%B3%A8%E6%84%8F%E7%9A%84%E5%AE%9E%E7%8E%B0%E7%BB%86%E8%8A%82)一些需要注意的实现细节
+
+- **输入处理**
+    - 可以使用 `getline()` 来获得用户输入；
+    - 在 `getline()` 返回 `-1` 时，代表读取失败，此时请结束程序；
+- **输出和错误信息**
+    - 使用框架代码中的函数打印各种错误信息；
+    - **不需要**额外使用 `printf()`，所有打印信息都可以通过提供的 `print_xxx()` 函数完成，如果一定要使用 `printf()`，请在每次使用 `printf()` 后使用 `fflush(stdout)` 清空输出缓冲区，并在报告中解释为什么需要使用 `printf()`；
+    - `sandbox` 功能使用 `print_blocked_syscall()` 打印系统调用信息，将系统调用名称和参数值**作为字符串** `char*` 传递给该函数（可以借助 `sprintf()` 或 `snprintf()` 函数），具体规则如下：
+        - 如果本身是字符串（`char*` 等），添加引号，如 `"\"Hello World!\""`；
+        - 如果是整数或浮点数、文件描述符等数字类型（包括 `int`, `unsigned long`, `size_t`, `mode_t` 和 `off_t` 等），直接转换为字符串，如 `"123"`；
+        - 如果是指针等地址类型，转换为十六进制字符串（包括 `char**` 和 `int*` 等），前面加 `0x`，如 `"0x8f"`；
+        - 其他类型都转换为十六进制字符串，前面加 `0x`，如 `"0x8f"`；
+- **命令合法性检查**
+    - 在执行每个命令前应该先做合法性检查 (例如，判断 `|` 和 `>` 出现的位置是否合适，`echo 1 > | a.txt` 就是一个不合法的命令)。如果命令不合法，直接输出 `Invalid Syntax` 错误信息，不要执行命令的任何一部分。
+- **注意多个需求点之间的可能 “组合” 情况**，我们不要求你的实现能处理所有可能的 corner case，但应该在一些简单和常见的情况下按预期工作；
+- **其它**
+    - 注意内存的分配和回收，不然会出现各种奇奇怪怪的问题；
+    - **gdb** 和 **valgrind** 会让你事半功倍。
+
+## [](https://gist.nju.edu.cn/course-os/docs/lab/lab1.html#-%E7%BB%93%E6%9E%9C%E8%AF%84%E4%BC%B0)📊 结果评估
+
+我们会在一批具有不同难度的测试用例上评估你实现 esh 的功能正确性、以及对一些常见组合场景的支持情况，各测试用例之间不会互相影响。我们强烈建议你在提交代码之前，**先根据实验手册编写相关的测试用例在本地进行测试**。
+
+以下给出了一些简单的测试，假设当前 esh 可执行文件位于 `/home/user/lab-1`，该目录下还存在目录 `a`，并且目录 `a` 下还有三个子目录 `a1`、`a2` 和 `a3`。
+
+**1. 内置命令**
+
+```
+esh > cd a
+esh > ls
+a1 a2 a3
+esh > cd ~
+esh > ls
+a esh
+esh > 
+```
+
+```
+esh > cd
+Invalid Syntax
+esh > 
+```
+
+```
+$ ./esh
+esh > env  # env 是外部命令，这里是为了查看环境变量的变化
+PATH=/bin
+HOME=/home/user/lab-1
+PWD=/home/user/lab-1
+OLDPWD=/home/user/lab-1
+LANG=en_US.UTF-8
+ESH_VERSION=1.9
+esh > export PATH=/bin:/abc  # export 是内置命令
+esh > env
+PATH=/bin:/abc
+HOME=/home/user/lab-1
+PWD=/home/user/lab-1
+OLDPWD=/home/user/lab-1
+LANG=en_US.UTF-8
+ESH_VERSION=1.9
+esh > 
+```
+
+**2. 执行外部命令**
+
+```
+esh > cd a
+esh > rm -r a1
+esh > ls
+a2 a3
+esh > 
+```
+
+```
+esh > cd a
+esh > rm -r b
+rm: cannot remove 'b': No such file or directory
+Execution Error
+esh > 
+```
+
+外部命令在执行过程中可能会通过错误流 (stderr) 输出一些信息。esh 不需要处理这些信息，只需要在合适的位置使用框架代码中的 `print_` 系列函数打印实验手册中要求的错误信息即可。
+
+**3. 管道**
+
+```
+esh > echo hello | cat
+hello
+esh > 
+```
+
+```
+esh > cd a
+esh > ech hello | ls
+Command Not Found
+a1 a2 a3
+esh > 
+```
+
+```
+ech > yes | head -n 5
+y
+y
+y
+y
+y
+Execution Error
+esh > 
+```
+
+注意 esh 有输出各类错误信息的需求，这会导致 esh 的管道执行输出结果和常见 Shell 不太一致，但管道本身需实现的行为和常见 Shell 是一致的。
+
+**4. 重定向**
+
+```
+esh > cd a
+esh > ls > 1.txt
+esh > cat 1.txt
+1.txt
+a1
+a2
+a3
+esh > 
+```
+
+```
+esh > cd a
+esh > ech 1 | ls > 1.txt
+Command Not Found
+esh > cat 1.txt
+1.txt
+a1
+a2
+a3
+esh > 
+```
+
+**5. 沙盒执行**
+
+假设当前可执行文件 `a.out` 的源代码为：
+
+```
+#include <stdio.h>
+
+int main() {
+  printf("hello world");
+  return 0;
+}
+```
+
+如果规则文件 `rule.txt` 为：
+
+```
+deny:write
+```
+
+则
+
+```
+esh > sandbox rule.txt ./a.out
+Blocked Syscall: write 1 "hello world" 11 
+esh > 
+```
+
+如果规则文件 `rule.txt` 为：
+
+```
+deny:write arg0=2
+```
+
+则
+
+```
+esh > sandbox rule.txt ./a.out
+hello worldesh > 
+```
