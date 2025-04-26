@@ -202,24 +202,26 @@ void cmd_cd(char *path) {
         print_execution_error();
         return;
     }
-    if (strcmp(path, "~") == 0) {
-        if (chdir(getenv("HOME")) < 0) {
+    
+    // 处理 ~ 开头的路径
+    if (path[0] == '~') {
+        char full_path[MAX_PATH_LEN];
+        snprintf(full_path, sizeof(full_path), "%s%s", getenv("HOME"), path + 1);
+        if (chdir(full_path) < 0) {
             print_execution_error();
             return;
         }
     }
-    else {
-        if (chdir(path) < 0) {
-            print_execution_error();
-            return;
-        }
+    else if (chdir(path) < 0) {
+        print_execution_error();
+        return;
     }
+    
     setenv("OLDPWD", cwd, 1);
     char new_cwd[MAX_PATH_LEN];
     if (getcwd(new_cwd, sizeof(new_cwd)) != NULL) {
         setenv("PWD", new_cwd, 1);
     }
-    return;
 }
 
 void cmd_export(char *name, char *value) {
@@ -269,7 +271,7 @@ int check_tokens(char *tokens[]) {
             // 检查连续管道
             if (tokens[i + 1] != NULL && (strcmp(tokens[i + 1], "|") == 0 || strcmp(tokens[i + 1], ">") == 0)) return 0;
             // 检查管道后是否有命令
-            if (tokens[i + 1] == NULL) return 0;
+            if (tokens[i + 1] == NULL || strlen(tokens[i + 1]) == 0) return 0;
         }
         else if (strcmp(tokens[i], ">") == 0) {
             // 检查重定向是否在开头
@@ -708,6 +710,11 @@ int exec_builtin_cmd(char *tokens[], int token_count, int in_child) {
             if (in_child) exit(1);
             return 0;
         }
+        else if (token_count > 2) {
+            print_invalid_syntax();
+            if (in_child) exit(1);
+            return 0;
+        }
         char *path = tokens[1];
         cmd_cd(path);
         if (in_child) exit(0);
@@ -885,32 +892,21 @@ int handle_cmd(char *tokens[], int token_count, Rule *head_rule) {
     }
     
     // 父进程等待子进程返回
-    int any_cmd_failed = 0;
     for (int i = 0; i < cmd_count; i++) {
         int status;
         waitpid(pids[i], &status, 0);
         
         // 检查进程是否异常终止
         if (WIFSIGNALED(status)) {
-            // 如果是不是"管道破裂"导致的终止，打印错误
-            if (WTERMSIG(status) != SIGPIPE) {
-                any_cmd_failed = 1;
-            } else {
-                // 如果是管道破裂(SIGPIPE)，也算作错误
-                any_cmd_failed = 1;
-            }
+            print_execution_error();
+            continue;
         }
         // 检查进程是否正常退出但返回错误码
         else if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
-            any_cmd_failed = 1;
+            print_execution_error();
+            continue;
         }
     }
-    
-    // 如果有任何命令失败，打印执行错误
-    if (any_cmd_failed) {
-        print_execution_error();
-    }
-    
     return 0;
 }
 
