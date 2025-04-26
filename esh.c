@@ -61,6 +61,9 @@ void print_blocked_syscall(char* syscall_name, int count, ...) {
 // You can add your own functions here
 //
 
+char *pipe_symbol = "|";
+char *redirect_symbol = ">";
+
 typedef struct Rule {
     char syscall_name[32];
     int param_count;
@@ -102,13 +105,90 @@ syscall_info_t syscall_infos[SYSCALLS_NUM] = {
 
 int tokenize(char *prompt, char *tokens[], int max_tokens) {
     int count = 0;
-    char *token = strtok(prompt, " ");
+    int in_quotes = 0;  // 是否在引号内
+    char *start = prompt;
+    char *p = prompt;
 
-    while (token != NULL && count < max_tokens) {
-        tokens[count++] = token;
-        token = strtok(NULL, " ");
+    while (*p != '\0' && count < max_tokens) {
+        // 处理引号
+        if (*p == '"') {
+            if (in_quotes) {
+                // 引号结束
+                *p = '\0';  // 截断字符串
+                if (p > start) {
+                    tokens[count++] = start + 1;  // +1 跳过开始的引号
+                }
+                in_quotes = 0;
+                start = p + 1;  // 下一个token从引号后开始
+            } else {
+                // 引号开始
+                if (p > start) {
+                    // 处理引号前的部分
+                    *p = '\0';
+                    
+                    // 分割非引号部分的空格分隔的token
+                    char *token = strtok(start, " ");
+                    while (token != NULL && count < max_tokens) {
+                        tokens[count++] = token;
+                        token = strtok(NULL, " ");
+                    }
+                }
+                in_quotes = 1;
+                start = p;  // 记住引号的位置
+            }
+        } else if (!in_quotes && (*p == '|' || *p == '>')) {
+            // 遇到管道符或重定向符（在引号外）
+            char sym = *p;
+            if (p > start) {
+                // 保存符号前的token
+                *p = '\0';
+                if (*start != '\0') {
+                    // 处理符号前可能有多个以空格分隔的token
+                    char *token = strtok(start, " ");
+                    while (token != NULL && count < max_tokens) {
+                        tokens[count++] = token;
+                        token = strtok(NULL, " ");
+                    }
+                }
+            }
+            
+            if (sym == '|') tokens[count++] = pipe_symbol;
+            else if (sym == '>') tokens[count++] = redirect_symbol;
+            
+            start = p + 1;
+        } else if (*p == ' ' && !in_quotes) {
+            // 不在引号内的空格，标记为字符串结束
+            *p = '\0';
+            
+            // 添加非空token
+            if (p > start && *start != '\0') {
+                tokens[count++] = start;
+            }
+            
+            start = p + 1;  // 下一个token从空格后开始
+        }
+        
+        p++;
     }
-    tokens[count] = NULL;
+    
+    // 处理最后一个token
+    if (!in_quotes && *start != '\0' && count < max_tokens) {
+        // 最后一段不在引号内，可能有多个以空格分隔的token
+        char *token = strtok(start, " ");
+        while (token != NULL && count < max_tokens) {
+            tokens[count++] = token;
+            token = strtok(NULL, " ");
+        }
+    } else if (in_quotes && count < max_tokens) {
+        // 未闭合的引号，当作普通字符串处理
+        tokens[count++] = start + 1;
+    }
+
+    // 确保tokens数组以NULL结尾
+    if (count < max_tokens) {
+        tokens[count] = NULL;
+    }
+    
     return count;
 }
 
