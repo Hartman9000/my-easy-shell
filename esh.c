@@ -24,6 +24,10 @@
 #define MAX_RULES 128
 #define MAX_PARAMS 8
 #define SYSCALLS_NUM 12
+#define EXIT_SUCCESS 0       // 成功退出
+#define EXIT_ERROR 1         // 执行错误
+#define EXIT_SYNTAX_ERROR 2  // 语法错误
+#define EXIT_CMD_NOT_FOUND 127  // 命令未找到
 
 void print_prompt() {
     printf("esh > ");
@@ -196,9 +200,10 @@ void cmd_exit() {
     exit(0);
 }
 
-void cmd_cd(char *path) {
+void cmd_cd(char *path, int in_child) {
     char cwd[MAX_PATH_LEN];
     if (getcwd(cwd, sizeof(cwd)) == NULL) {
+        if (in_child) exit(EXIT_ERROR);
         print_execution_error();
         return;
     }
@@ -208,11 +213,13 @@ void cmd_cd(char *path) {
         char full_path[MAX_PATH_LEN];
         snprintf(full_path, sizeof(full_path), "%s%s", getenv("HOME"), path + 1);
         if (chdir(full_path) < 0) {
+            if (in_child) exit(EXIT_ERROR);
             print_execution_error();
             return;
         }
     }
     else if (chdir(path) < 0) {
+        if (in_child) exit(EXIT_ERROR);
         print_execution_error();
         return;
     }
@@ -222,13 +229,8 @@ void cmd_cd(char *path) {
     if (getcwd(new_cwd, sizeof(new_cwd)) != NULL) {
         setenv("PWD", new_cwd, 1);
     }
-}
 
-void cmd_export(char *name, char *value) {
-    if(setenv(name, value, 1) < 0) {
-        print_execution_error();
-        return;
-    }
+    if (in_child) exit(EXIT_SUCCESS);
 }
 
 int find_executable(char *filename) {
@@ -311,7 +313,7 @@ Rule *parse_rules(const char *filename, Rule **head_rule) {
             continue;
         }
         if (strncmp(line, "deny:", 5) != 0) {
-            printf("invalid rule format: %s\n", line);
+            print_execution_error();
             continue;
         }
 
@@ -699,7 +701,7 @@ int is_builtin_cmd(char *cmd) {
 int exec_builtin_cmd(char *tokens[], int token_count, int in_child) {
     if (strcmp(tokens[0], "exit") == 0) {
         if (in_child) {
-            exit(0);  // 子进程直接退出
+            exit(EXIT_SUCCESS);  // 子进程直接退出
         } else {
             cmd_exit();  // 主进程调用cmd_exit
         }
@@ -707,32 +709,33 @@ int exec_builtin_cmd(char *tokens[], int token_count, int in_child) {
     }
     else if (strcmp(tokens[0], "cd") == 0) {
         if (token_count == 1) {
+            if (in_child) exit(EXIT_SYNTAX_ERROR);
             print_invalid_syntax();
-            if (in_child) exit(1);
             return 0;
         }
         else if (token_count > 2) {
+            if (in_child) exit(EXIT_SYNTAX_ERROR);
             print_invalid_syntax();
-            if (in_child) exit(1);
             return 0;
         }
         char *path = tokens[1];
-        cmd_cd(path);
-        if (in_child) exit(0);
+        cmd_cd(path, in_child);
+
+        if (in_child) exit(EXIT_SUCCESS);
         return 1;
     }
     else if (strcmp(tokens[0], "export") == 0) {
         if (token_count == 1) {
+            if (in_child) exit(EXIT_SYNTAX_ERROR);
             print_invalid_syntax();
-            if (in_child) exit(1);
             return 0;
         }
         char *equal = strchr(tokens[1], '=');
         char *name = NULL;
         char *value = NULL;
         if (equal == NULL) {
+            if (in_child) exit(EXIT_SYNTAX_ERROR);
             print_invalid_syntax();
-            if (in_child) exit(1);
             return 0;
         }
         else {
@@ -740,15 +743,19 @@ int exec_builtin_cmd(char *tokens[], int token_count, int in_child) {
             name = strndup(tokens[1], name_len);
             value = strdup(equal + 1);
         }
-        cmd_export(name, value);
+        if(setenv(name, value, 1) < 0) {
+            if (in_child) exit(EXIT_ERROR);
+            print_execution_error();
+            return 0;
+        }
         free(name);
         free(value);
-        if (in_child) exit(0);
+        if (in_child) exit(EXIT_SUCCESS);
         return 1;
     }
     
     // 不是内置命令
-    if (in_child) exit(1);  // 子进程出错退出
+    if (in_child) exit(EXIT_CMD_NOT_FOUND);  // 子进程出错退出
     return 0;               // 主进程返回0表示不是内置命令
 }
 
@@ -782,20 +789,29 @@ int handle_cmd(char *tokens[], int token_count, Rule *head_rule) {
         if (i == token_count || strcmp(tokens[i], "|") == 0) {
             // 构建当前子命令参数
             int current_token_count = 0;
-            int redirect_pos = -1;
-            
-            // 查找重定向符号位置
+            int redirect_positions[MAX_TOKENS]; // 存储所有重定向符号位置
+            int redirect_count = 0;
+
+            // 查找所有重定向符号位置
             for (int j = cmd_start; j < i; j++) {
                 if (strcmp(tokens[j], ">") == 0) {
-                    redirect_pos = j;
-                    break;
+                    redirect_positions[redirect_count++] = j;
+                } else if (redirect_count == 0) {
+                    // 只添加重定向符号前的token作为命令参数
+                    current_tokens[current_token_count++] = tokens[j];
                 }
-                current_tokens[current_token_count++] = tokens[j];
             }
             current_tokens[current_token_count] = NULL;
             
             // 检查重定向语法
-            if (redirect_pos != -1 && (redirect_pos + 1 >= i)) {
+            int invalid_redirect = 0;
+            for (int j = 0; j < redirect_count; j++) {
+                if (redirect_positions[j] + 1 >= i || (j > 0 && redirect_positions[j] != redirect_positions[j-1] + 2)) {
+                    invalid_redirect = 1;
+                    break;
+                }
+            }
+            if (invalid_redirect) {
                 print_invalid_syntax();
                 prev_cmd_failed = 1;
                 cmd_idx++;
@@ -804,15 +820,6 @@ int handle_cmd(char *tokens[], int token_count, Rule *head_rule) {
             }
 
             int is_builtin = is_builtin_cmd(current_tokens[0]);
-            
-            // 检查命令是否可执行
-            if (!is_builtin && (current_token_count == 0 || !find_executable(current_tokens[0]))) {
-                print_command_not_found();
-                prev_cmd_failed = 1;
-                cmd_idx++;
-                cmd_start = i + 1;
-                continue;
-            }
             
             // fork子进程
             pids[cmd_idx] = fork();
@@ -844,17 +851,23 @@ int handle_cmd(char *tokens[], int token_count, Rule *head_rule) {
                 }
                 
                 // 设置输出
-                if (redirect_pos != -1) {
-                    // 如果有重定向，输出到文件
-                    int fd = open(tokens[redirect_pos + 1], O_CREAT | O_WRONLY | O_TRUNC, 0644);
-                    if (fd < 0) {
-                        print_execution_error();
-                        exit(0);
+                if (redirect_count > 0) {
+                    // 创建所有重定向文件
+                    for (int j = 0; j < redirect_count; j++) {
+                        int pos = redirect_positions[j];
+                        int fd = open(tokens[pos + 1], O_CREAT | O_WRONLY | O_TRUNC, 0644);
+                        if (fd < 0) {
+                            print_execution_error();
+                            exit(EXIT_ERROR);
+                        }
+                        
+                        if (j == redirect_count - 1) {
+                            // 最后一个重定向文件连接到标准输出
+                            dup2(fd, STDOUT_FILENO);
+                        }
+                        close(fd);
                     }
-                    dup2(fd, STDOUT_FILENO);
-                    close(fd);
                 } else if (cmd_idx < pipe_count) {
-                    // 如果没有重定向且不是最后一个命令，输出到管道
                     dup2(pipefds[cmd_idx][1], STDOUT_FILENO);
                 }
                 
@@ -867,11 +880,17 @@ int handle_cmd(char *tokens[], int token_count, Rule *head_rule) {
                 // 执行
                 if (is_builtin) {
                     exec_builtin_cmd(current_tokens, current_token_count, 1);
-                    exit(1);
+                    exit(EXIT_SUCCESS);
                 }
+                // 在子进程中执行外部命令时修改
                 else if (execvp(current_tokens[0], current_tokens) < 0) {
-                    print_execution_error();
-                    exit(0);
+                    if (errno == ENOENT) {
+                        // print_command_not_found();
+                        exit(EXIT_CMD_NOT_FOUND);
+                    } else {
+                        // print_execution_error();
+                        exit(EXIT_ERROR);
+                    }
                 }
             }
             
@@ -891,23 +910,28 @@ int handle_cmd(char *tokens[], int token_count, Rule *head_rule) {
         close(pipefds[i][0]);
         close(pipefds[i][1]);
     }
-    
+
     // 父进程等待子进程返回
     for (int i = 0; i < cmd_count; i++) {
         int status;
         waitpid(pids[i], &status, 0);
         
-        // 检查进程是否异常终止
-        // if (WIFSIGNALED(status)) {
-        //     print_execution_error();
-        //     continue;
-        // }
-        // 检查进程是否正常退出但返回错误码
-        if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+        if (WIFEXITED(status)) {
+            // 根据子进程的退出状态码判断错误类型
+            int exit_code = WEXITSTATUS(status);
+            if (exit_code == EXIT_CMD_NOT_FOUND) {
+                print_command_not_found();
+            } else if (exit_code == EXIT_SYNTAX_ERROR) {
+                print_invalid_syntax();
+            } else if (exit_code != EXIT_SUCCESS) {
+                print_execution_error();
+            }
+        } else if (WIFSIGNALED(status)) {
+            // 被信号终止的进程视为执行错误
             print_execution_error();
-            continue;
         }
     }
+
     return 0;
 }
 
