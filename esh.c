@@ -26,7 +26,7 @@
 #define SYSCALLS_NUM 12
 #define EXIT_SUCCESS 0       // 成功退出
 #define EXIT_ERROR 1         // 执行错误
-#define EXIT_SYNTAX_ERROR 2  // 语法错误
+#define EXIT_SYNTAX_ERROR 17  // 语法错误
 #define EXIT_CMD_NOT_FOUND 127  // 命令未找到
 
 void print_prompt() {
