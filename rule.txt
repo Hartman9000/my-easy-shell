@@ -1,1 +1,1 @@
-deny:mmap arg2=0x3
+deny:write arg1="hello"

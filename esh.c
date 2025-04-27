@@ -108,6 +108,8 @@ syscall_info_t syscall_infos[SYSCALLS_NUM] = {
     {"chmod",      90, {ARG_TYPE_STRING, ARG_TYPE_INT}}                       // pathname, mode
 };
 
+int sandbox_blocked = 0;
+
 int tokenize(char *prompt, char *tokens[], int max_tokens) {
     int count = 0;
     int in_quotes = 0;  // 是否在引号内
@@ -743,17 +745,13 @@ void trace_child(pid_t child_pid, Rule *head_rule) {
                                 // 处理并打印被阻止的系统调用信息
                                 handle_blocked_syscall(child_pid, rule, syscall_num, &regs);
                                 
-                                // 修改系统调用返回结果为错误
-                                regs.orig_rax = -1;
-                                ptrace(PTRACE_SETREGS, child_pid, NULL, &regs);
+                                // 设置全局标志，表示检测到被阻止的系统调用
+                                sandbox_blocked = 1;
                                 
-                                // 设置退出状态码
-                                regs.rax = EXIT_SANDBOX_BLOCKED;
-                                ptrace(PTRACE_SETREGS, child_pid, NULL, &regs);
+                                // 杀死子进程
+                                ptrace(PTRACE_KILL, child_pid, NULL, NULL);
                                 
-                                // 继续执行让子进程自己退出
-                                ptrace(PTRACE_CONT, child_pid, NULL, NULL);
-                                return;
+                                return;  // 立即返回
                             }
                         }
                         rule = rule->next;
@@ -849,6 +847,7 @@ int handle_cmd(char *tokens[], int token_count, Rule *head_rule) {
     int cmd_count = pipe_count + 1;
 
     // 创建管道
+    sandbox_blocked = 0;
     int pipefds[pipe_count][2];
     for (int i = 0; i < pipe_count; i++) {
         if (pipe(pipefds[i]) < 0) {
@@ -979,6 +978,29 @@ int handle_cmd(char *tokens[], int token_count, Rule *head_rule) {
             
             if (head_rule != NULL) {
                 trace_child(pids[cmd_idx], head_rule);
+
+                // 检测系统调用是否被阻止
+                if (sandbox_blocked) {
+                    // 如果有系统调用被阻止，杀死所有已创建的进程
+                    for (int j = 0; j <= cmd_idx; j++) {
+                        kill(pids[j], SIGKILL);
+                    }
+                    
+                    // 关闭所有管道以避免资源泄漏
+                    for (int j = 0; j < pipe_count; j++) {
+                        close(pipefds[j][0]);
+                        close(pipefds[j][1]);
+                    }
+                    
+                    // 等待所有已创建的子进程退出（但不检查退出状态）
+                    for (int j = 0; j <= cmd_idx; j++) {
+                        int status;
+                        waitpid(pids[j], &status, 0);
+                    }
+                    
+                    // 直接返回，不再创建更多进程
+                    return 0;
+                }
             }
 
             cmd_idx++;
