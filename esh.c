@@ -232,6 +232,7 @@ void cmd_export(char *name, char *value) {
 }
 
 int find_executable(char *filename) {
+    if (strlen(filename) == 0) return 0;
     char *slash = strchr(filename, '/');
     if (slash != NULL) {    //存在‘/’，直接查找
         if (access(filename, X_OK) == 0) {
@@ -271,7 +272,7 @@ int check_tokens(char *tokens[]) {
             // 检查连续管道
             if (tokens[i + 1] != NULL && (strcmp(tokens[i + 1], "|") == 0 || strcmp(tokens[i + 1], ">") == 0)) return 0;
             // 检查管道后是否有命令
-            if (tokens[i + 1] == NULL || strlen(tokens[i + 1]) == 0) return 0;
+            if (tokens[i + 1] == NULL) return 0;
         }
         else if (strcmp(tokens[i], ">") == 0) {
             // 检查重定向是否在开头
@@ -897,12 +898,12 @@ int handle_cmd(char *tokens[], int token_count, Rule *head_rule) {
         waitpid(pids[i], &status, 0);
         
         // 检查进程是否异常终止
-        if (WIFSIGNALED(status)) {
-            print_execution_error();
-            continue;
-        }
+        // if (WIFSIGNALED(status)) {
+        //     print_execution_error();
+        //     continue;
+        // }
         // 检查进程是否正常退出但返回错误码
-        else if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+        if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
             print_execution_error();
             continue;
         }
