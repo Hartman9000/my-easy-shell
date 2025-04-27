@@ -28,6 +28,7 @@
 #define EXIT_ERROR 1         // 执行错误
 #define EXIT_SYNTAX_ERROR 17  // 语法错误
 #define EXIT_CMD_NOT_FOUND 127  // 命令未找到
+#define EXIT_SANDBOX_BLOCKED 42
 
 void print_prompt() {
     printf("esh > ");
@@ -299,56 +300,127 @@ int check_tokens(char *tokens[]) {
 Rule *parse_rules(const char *filename, Rule **head_rule) {
     FILE *file = fopen(filename, "r");
     if (!file) {
-        perror("Failed to open rule file\n");
-        print_execution_error();
-        return NULL;
+        perror("Failed to open rule file");
+        return NULL;  // 返回NULL但不输出错误信息
     }
 
     char line[256];
-    int rule_count = 0;
-
     while (fgets(line, sizeof(line), file)) {
+        // 去除换行符
         line[strcspn(line, "\n")] = '\0';
+        
+        // 忽略空行和注释行
         if (strlen(line) == 0 || line[0] == '#') {
             continue;
         }
+        
+        // 处理行末注释
+        char *comment_pos = strchr(line, '#');
+        if (comment_pos != NULL) {
+            *comment_pos = '\0';  // 删除注释部分
+        }
+        
+        // 去除末尾空白字符
+        int len = strlen(line);
+        while (len > 0 && isspace(line[len-1])) {
+            line[--len] = '\0';
+        }
+        
+        // 检查是否以 deny: 开头
         if (strncmp(line, "deny:", 5) != 0) {
-            print_execution_error();
+            continue;  // 忽略非法行，不输出错误
+        }
+
+        // 分配规则结构体
+        Rule *rule = (Rule *)malloc(sizeof(Rule));
+        if (!rule) {
+            continue;  // 内存分配失败
+        }
+        memset(rule, 0, sizeof(Rule));  // 初始化为零
+        
+        // 提取系统调用名
+        char *pos = line + 5;
+        while (*pos && isspace(*pos)) pos++;  // 跳过前导空格
+        
+        char *syscall_end = pos;
+        while (*syscall_end && !isspace(*syscall_end)) syscall_end++;
+        
+        int syscall_len = syscall_end - pos;
+        if (syscall_len == 0 || syscall_len >= sizeof(rule->syscall_name)) {
+            free(rule);
             continue;
         }
-
-        //提取系统调用名和参数
-        char *syscall_name = strtok(line + 5, " ");
-
-        Rule *rule = (Rule *)malloc(sizeof(Rule));
-        strncpy(rule->syscall_name, syscall_name, sizeof(rule->syscall_name) - 1);
-        rule->param_count = 0;
-
-        char *param_condition = strtok(NULL, " ");
-        while (param_condition && rule->param_count < MAX_PARAMS) {
-            int idx;
-            char value[128];
-            if (sscanf(param_condition, "arg%d=%s", &idx, value) == 2) {
-                rule->param_indices[rule->param_count] = idx;
-                if (value[0] == '"') {
-                    strncpy(rule->param_values[rule->param_count], value + 1, sizeof(rule->param_values[0]) - 1);
-                    rule->param_values[rule->param_count][strcspn(rule->param_values[rule->param_count], "\"")] = '\0';
-                }
-                else {
-                    strncpy(rule->param_values[rule->param_count], value, sizeof(rule->param_values[0]) - 1);
-                }
-                rule->param_count ++;
-            } else {
-                print_execution_error();
-                break;
+        
+        strncpy(rule->syscall_name, pos, syscall_len);
+        rule->syscall_name[syscall_len] = '\0';
+        
+        // 解析参数
+        pos = syscall_end;
+        while (*pos && rule->param_count < MAX_PARAMS) {
+            // 跳过空格
+            while (*pos && isspace(*pos)) pos++;
+            if (!*pos) break;
+            
+            // 检查是否是arg开头
+            if (strncmp(pos, "arg", 3) != 0) {
+                break;  // 不是arg开头，结束解析
             }
-            param_condition = strtok(NULL, " ");
+            
+            pos += 3;  // 跳过"arg"
+            
+            // 获取参数索引
+            char *endptr;
+            int idx = strtol(pos, &endptr, 10);
+            if (endptr == pos || *endptr != '=') {
+                break;  // 参数索引解析失败
+            }
+            
+            rule->param_indices[rule->param_count] = idx;
+            pos = endptr + 1;  // 跳过等号
+            
+            // 处理参数值
+            if (*pos == '"') {  // 双引号开始的字符串
+                pos++;  // 跳过开始引号
+                char *value_start = pos;
+                
+                // 寻找结束引号
+                while (*pos && *pos != '"') pos++;
+                
+                if (!*pos) {  // 没找到结束引号
+                    break;
+                }
+                
+                int value_len = pos - value_start;
+                if (value_len >= sizeof(rule->param_values[0])) {
+                    value_len = sizeof(rule->param_values[0]) - 1;
+                }
+                
+                strncpy(rule->param_values[rule->param_count], value_start, value_len);
+                rule->param_values[rule->param_count][value_len] = '\0';
+                pos++;  // 跳过结束引号
+            } else {  // 非引号包围的值
+                char *value_start = pos;
+                
+                // 寻找空格或结束
+                while (*pos && !isspace(*pos)) pos++;
+                
+                int value_len = pos - value_start;
+                if (value_len >= sizeof(rule->param_values[0])) {
+                    value_len = sizeof(rule->param_values[0]) - 1;
+                }
+                
+                strncpy(rule->param_values[rule->param_count], value_start, value_len);
+                rule->param_values[rule->param_count][value_len] = '\0';
+            }
+            
+            rule->param_count++;
         }
+        
+        // 将规则添加到链表
         if (*head_rule == NULL) {
             *head_rule = rule;
             rule->next = NULL;
-        }
-        else {
+        } else {
             rule->next = *head_rule;
             *head_rule = rule;
         }
@@ -652,7 +724,7 @@ void trace_child(pid_t child_pid, Rule *head_rule) {
                     }
                 }
     
-                //调试内容
+                // 调试内容
                 // if (syscall_idx >=0) {
                 //     printf("in_syscall:%d\n",in_syscall);
                 //     printf("WSTOPSIG(status):%u\n", WSTOPSIG(status));
@@ -667,13 +739,20 @@ void trace_child(pid_t child_pid, Rule *head_rule) {
                         // 检查系统调用名称是否与当前规则匹配
                         if (strcmp(syscall_infos[syscall_idx].name, rule->syscall_name) == 0) {
                             // 如果没有参数条件或参数条件匹配，则阻止系统调用
-                            if (rule->param_count == 0 || 
-                                match_rule(child_pid, rule, syscall_num, &regs)) {
+                            if (rule->param_count == 0 || match_rule(child_pid, rule, syscall_num, &regs)) {
                                 // 处理并打印被阻止的系统调用信息
                                 handle_blocked_syscall(child_pid, rule, syscall_num, &regs);
                                 
-                                // 终止进程
-                                ptrace(PTRACE_KILL, child_pid, NULL, NULL);
+                                // 修改系统调用返回结果为错误
+                                regs.orig_rax = -1;
+                                ptrace(PTRACE_SETREGS, child_pid, NULL, &regs);
+                                
+                                // 设置退出状态码
+                                regs.rax = EXIT_SANDBOX_BLOCKED;
+                                ptrace(PTRACE_SETREGS, child_pid, NULL, &regs);
+                                
+                                // 继续执行让子进程自己退出
+                                ptrace(PTRACE_CONT, child_pid, NULL, NULL);
                                 return;
                             }
                         }
@@ -898,7 +977,9 @@ int handle_cmd(char *tokens[], int token_count, Rule *head_rule) {
             if (cmd_idx > 0) close(pipefds[cmd_idx - 1][0]); // 关闭前一个管道的读端
             if (cmd_idx < pipe_count) close(pipefds[cmd_idx][1]); // 关闭当前管道的写端
             
-            if (head_rule != NULL) trace_child(pids[cmd_idx], head_rule);
+            if (head_rule != NULL) {
+                trace_child(pids[cmd_idx], head_rule);
+            }
 
             cmd_idx++;
             cmd_start = i + 1;
@@ -919,7 +1000,9 @@ int handle_cmd(char *tokens[], int token_count, Rule *head_rule) {
         if (WIFEXITED(status)) {
             // 根据子进程的退出状态码判断错误类型
             int exit_code = WEXITSTATUS(status);
-            if (exit_code == EXIT_CMD_NOT_FOUND) {
+            if (exit_code == EXIT_SANDBOX_BLOCKED) {
+                continue;
+            } else if (exit_code == EXIT_CMD_NOT_FOUND) {
                 print_command_not_found();
             } else if (exit_code == EXIT_SYNTAX_ERROR) {
                 print_invalid_syntax();

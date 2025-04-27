@@ -1,0 +1,11 @@
+Makefile
+a
+a.c
+a.out
+a.txt
+conf
+esh
+esh.c
+lab1.md
+output.txt
+rule.txt
