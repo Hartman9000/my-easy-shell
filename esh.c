@@ -93,18 +93,18 @@ typedef struct {
 
 // 预定义支持的系统调用信息
 syscall_info_t syscall_infos[SYSCALLS_NUM] = {
-    {"read",        0, {ARG_TYPE_INT, ARG_TYPE_POINTER, ARG_TYPE_INT}},       // fd, buf, count
-    {"write",       1, {ARG_TYPE_INT, ARG_TYPE_STRING, ARG_TYPE_INT}},       // fd, buf, count
-    {"open",        2, {ARG_TYPE_STRING, ARG_TYPE_INT, ARG_TYPE_INT}},        // filename, flags, mode
+    {"read",        0, {ARG_TYPE_INT, ARG_TYPE_STRING, ARG_TYPE_INT, 0, 0, 0}},       // fd, buf, count
+    {"write",       1, {ARG_TYPE_INT, ARG_TYPE_STRING, ARG_TYPE_INT, 0, 0, 0}},       // fd, buf, count
+    {"open",        2, {ARG_TYPE_STRING, ARG_TYPE_INT, ARG_TYPE_INT, 0, 0, 0}},        // filename, flags, mode
     {"mmap",        9, {ARG_TYPE_POINTER, ARG_TYPE_INT, ARG_TYPE_INT, ARG_TYPE_INT, ARG_TYPE_INT, ARG_TYPE_INT}}, // addr, length, prot, flags, fd, offset
-    {"pipe",       22, {ARG_TYPE_POINTER}},                                   // filedes
+    {"pipe",       22, {ARG_TYPE_POINTER, 0, 0, 0, 0, 0}},                                   // filedes
     {"sched_yield",24, {0}},                                                  // 无参数
-    {"dup",        32, {ARG_TYPE_INT}},                                       // oldfd
-    {"clone",      56, {ARG_TYPE_INT, ARG_TYPE_POINTER, ARG_TYPE_POINTER, ARG_TYPE_POINTER, ARG_TYPE_INT}}, // flags, stack, parent_tid, child_tid, tls
+    {"dup",        32, {ARG_TYPE_INT, 0, 0, 0, 0, 0}},                                       // oldfd
+    {"clone",      56, {ARG_TYPE_INT, ARG_TYPE_POINTER, ARG_TYPE_POINTER, ARG_TYPE_POINTER, ARG_TYPE_INT, 0}}, // flags, stack, parent_tid, child_tid, tls
     {"fork",       57, {0}},                                                  // 无参数
-    {"execve",     59, {ARG_TYPE_STRING, ARG_TYPE_POINTER, ARG_TYPE_POINTER}}, // filename, argv, envp
-    {"mkdir",      83, {ARG_TYPE_STRING, ARG_TYPE_INT}},                      // pathname, mode
-    {"chmod",      90, {ARG_TYPE_STRING, ARG_TYPE_INT}}                       // pathname, mode
+    {"execve",     59, {ARG_TYPE_STRING, ARG_TYPE_POINTER, ARG_TYPE_POINTER, 0, 0, 0}}, // filename, argv, envp
+    {"mkdir",      83, {ARG_TYPE_STRING, ARG_TYPE_INT, 0, 0, 0, 0}},                      // pathname, mode
+    {"chmod",      90, {ARG_TYPE_STRING, ARG_TYPE_INT, 0, 0, 0, 0}}                       // pathname, mode
 };
 
 int sandbox_blocked = 0;
@@ -449,15 +449,18 @@ void free_rules(Rule **head_rule) {
 }
 
 // 从进程内存中读取字符串
-char* read_string_from_process(pid_t pid, unsigned long addr) {
-    char *str = malloc(4096); // 分配足够大的缓冲区
+char* read_string_from_process(pid_t pid, unsigned long addr, size_t max_len) {
+    // max_len = 0 表示不限长度
+    size_t limit = (max_len > 0) ? max_len : 4095;
+    
+    char* str = malloc(limit + 1);
     if (!str) return NULL;
     
     size_t i = 0;
     long data;
     size_t bytes_read = 0;
     
-    while (i < 4095) {
+    while (i < limit) {
         errno = 0;
         data = ptrace(PTRACE_PEEKDATA, pid, addr + bytes_read, NULL);
         if (errno != 0) {
@@ -465,34 +468,34 @@ char* read_string_from_process(pid_t pid, unsigned long addr) {
             return NULL;
         }
         
-        // 逐字节处理，避免写入过多数据
         unsigned char *c = (unsigned char *)&data;
-        for (size_t j = 0; j < sizeof(long) && i < 4095; j++) {
+        for (size_t j = 0; j < sizeof(long) && i < limit; j++) {
             str[i++] = c[j];
             bytes_read++;
             
-            // 检测到null终止符就结束
-            if (c[j] == '\0') {
+            // 如果达到指定长度或遇到NULL终止符就结束
+            if ((max_len > 0 && bytes_read >= max_len) || c[j] == '\0') {
+                str[i] = '\0';
                 return str;
             }
         }
     }
     
-    // 确保字符串总是以null终止
-    str[i < 4095 ? i : 4095] = '\0';
+    // 确保字符串总是以NULL终止
+    str[i < limit ? i : limit] = '\0';
     return str;
 }
 
-int match_rule(pid_t child_pid, Rule *rule, long syscall_num, struct user_regs_struct *regs) {
-    // 找到系统调用索引
+int match_rule(pid_t child_pid, Rule *rule, struct user_regs_struct *regs) {
+    // 找到系统调用在预定义表中的索引
     int syscall_index = -1;
     for (int i = 0; i < SYSCALLS_NUM; i++) {
-        if (syscall_infos[i].syscall_number == syscall_num && 
-            strcmp(syscall_infos[i].name, rule->syscall_name) == 0) {
+        if (strcmp(syscall_infos[i].name, rule->syscall_name) == 0) {
             syscall_index = i;
             break;
         }
     }
+    int syscall_num = syscall_infos[syscall_index].syscall_number;
     
     if (syscall_index == -1) return 0;
     
@@ -509,7 +512,7 @@ int match_rule(pid_t child_pid, Rule *rule, long syscall_num, struct user_regs_s
     
     // 检查每个参数条件，必须全部匹配
     for (int i = 0; i < rule->param_count; i++) {
-        //遍历每个参数
+        //遍历每个参数  参数索引：param_indices[i]  参数值：rule->param_values[i]  需要比较args[param_idx]和rule->param_values[i]
         int param_idx = rule->param_indices[i];
         if (param_idx < 0 || param_idx >= 6) continue;
         
@@ -519,7 +522,12 @@ int match_rule(pid_t child_pid, Rule *rule, long syscall_num, struct user_regs_s
         switch (arg_type) {
             case ARG_TYPE_STRING: {
                 // 对于字符串参数，从进程内存中读取并比较
-                char *param_str = read_string_from_process(child_pid, args[param_idx]);
+                char *param_str;
+                if (syscall_num == 1) {
+                    param_str = read_string_from_process(child_pid, args[param_idx], args[2]);
+                } else {
+                    param_str = read_string_from_process(child_pid, args[param_idx], 0);
+                }
                 if (param_str) {
                     if (strcmp(param_str, rule->param_values[i]) == 0) {
                         param_matched = 1; // 字符串匹配
@@ -571,14 +579,30 @@ int match_rule(pid_t child_pid, Rule *rule, long syscall_num, struct user_regs_s
 }
 
 // 将参数值转换为适当的字符串形式
-char* format_param_value(pid_t child_pid, unsigned long long arg_value, arg_type_t arg_type) {
+char* format_param_value(pid_t child_pid, long syscall_num, int param_idx, unsigned long long *args) {
+    arg_type_t arg_type;
+    for (int i = 0; i < SYSCALLS_NUM; i++) {
+        if (syscall_infos[i].syscall_number == syscall_num) {
+            arg_type = syscall_infos[i].arg_types[param_idx];
+            break;
+        }
+    }
+
+    unsigned long long arg_value = args[param_idx];
     char* result = malloc(1024); // 足够大的缓冲区
     if (!result) return NULL;
     
     switch (arg_type) {
         case ARG_TYPE_STRING: {
             // 字符串类型: 从进程内存读取并添加引号
-            char* str = read_string_from_process(child_pid, arg_value);
+            size_t max_len = 0;  // 默认不限长度
+            
+            // 对于write系统调用的第二个参数(buf)，使用第三个参数(count)作为最大长度限制
+            if (syscall_num == 1 && param_idx == 1 && args != NULL) {
+                max_len = args[2];  // 第三个参数是长度
+            }
+            
+            char* str = read_string_from_process(child_pid, arg_value, max_len);
             if (str) {
                 snprintf(result, 1023, "\"%s\"", str);
                 free(str);
@@ -603,7 +627,7 @@ char* format_param_value(pid_t child_pid, unsigned long long arg_value, arg_type
 }
 
 // 在系统调用被阻止时收集并格式化参数
-void handle_blocked_syscall(pid_t child_pid, Rule *rule, long syscall_num, struct user_regs_struct *regs) {
+void handle_blocked_syscall(pid_t child_pid, long syscall_num, struct user_regs_struct *regs) {
     // 找到系统调用索引
     int syscall_index = -1;
     for (int i = 0; i < SYSCALLS_NUM; i++) {
@@ -631,48 +655,17 @@ void handle_blocked_syscall(pid_t child_pid, Rule *rule, long syscall_num, struc
     // 收集参数值并格式化
     if (param_count > 0) {
         for (int i = 0; i < param_count; i++) {
-                param_strings[i] = format_param_value(child_pid, args[i], syscall_infos[syscall_index].arg_types[i]);
-
-            // 特殊处理 write 系统调用的情况
-            if (syscall_num == 1 && i == 1 && param_count >= 3) {
-                // write 系统调用，第2个参数是缓冲区，第3个参数是长度
-                unsigned long long buf_len = args[2]; // 第3个参数是长度
-                
-                // 只处理字符串类型的参数
-                if (syscall_infos[syscall_index].arg_types[i] == ARG_TYPE_STRING) {
-                    // 重新读取字符串，限制长度为 buf_len
-                    char* str = read_string_from_process(child_pid, args[i]);
-                    if (str) {
-                        // 释放之前生成的字符串
-                        free(param_strings[i]);
-                        
-                        // 创建一个新缓冲区，大小足以容纳 buf_len 长度的字符串加上引号和终止符
-                        char* limited_buf = malloc(buf_len + 3);
-                        if (limited_buf) {
-                            // 复制带引号的格式
-                            limited_buf[0] = '"';
-                            
-                            // 复制最多 buf_len 个字符，不进行特殊字符处理
-                            size_t j;
-                            for (j = 0; j < buf_len && str[j]; j++) {
-                                limited_buf[j + 1] = str[j];
-                            }
-                            
-                            // 添加结束引号和终止符
-                            limited_buf[j + 1] = '"';
-                            limited_buf[j + 2] = '\0';
-                            
-                            param_strings[i] = limited_buf;
-                        }
-                        free(str);
-                    }
-                }
-            }
+            param_strings[i] = format_param_value(
+                child_pid, 
+                syscall_num,
+                i,
+                args  // 传入完整的参数数组
+            );
         }
     }
     
     // 打印阻止的系统调用信息
-    print_blocked_syscall(rule->syscall_name, param_count,
+    print_blocked_syscall(syscall_infos[syscall_index].name, param_count,
                          param_count > 0 ? param_strings[0] : NULL,
                          param_count > 1 ? param_strings[1] : NULL,
                          param_count > 2 ? param_strings[2] : NULL,
@@ -688,39 +681,39 @@ void handle_blocked_syscall(pid_t child_pid, Rule *rule, long syscall_num, struc
     }
 }
 
-void show_syscall(int syscall_idx,pid_t child_pid, struct user_regs_struct *regs) {
-    if (syscall_idx >= 0) {
-        // 获取系统调用的参数值
-        unsigned long long args[6] = {
-            regs->rdi, regs->rsi, regs->rdx, 
-            regs->r10, regs->r8, regs->r9
-        };
-        // 如果系统调用被支持，打印调试信息
-        printf("Detected supported syscall: %s\n", syscall_infos[syscall_idx].name);
-        // 打印系统调用的参数
-        for (int i = 0; i < 6; i++) {
-            arg_type_t arg_type = syscall_infos[syscall_idx].arg_types[i];
-            switch (arg_type) {
-                case ARG_TYPE_STRING: {
-                    char *param_str = read_string_from_process(child_pid, args[i]);
-                    printf("  arg%d: \"%s\" (string)\n", i, param_str ? param_str : "(null)");
-                    free(param_str);
-                    break;
-                }
-                case ARG_TYPE_INT:
-                    printf("  arg%d: %lld (int)\n", i, args[i]);
-                    break;
-                case ARG_TYPE_POINTER:
-                    printf("  arg%d: 0x%llx (pointer)\n", i, args[i]);
-                    break;
-                case ARG_TYPE_OTHER:
-                default:
-                    printf("  arg%d: 0x%llx (other/unknown)\n", i, args[i]);
-                    break;
-            }
-        }
-    }
-}
+// void show_syscall(int syscall_idx,pid_t child_pid, struct user_regs_struct *regs) {
+//     if (syscall_idx >= 0) {
+//         // 获取系统调用的参数值
+//         unsigned long long args[6] = {
+//             regs->rdi, regs->rsi, regs->rdx, 
+//             regs->r10, regs->r8, regs->r9
+//         };
+//         // 如果系统调用被支持，打印调试信息
+//         printf("Detected supported syscall: %s\n", syscall_infos[syscall_idx].name);
+//         // 打印系统调用的参数
+//         for (int i = 0; i < 6; i++) {
+//             arg_type_t arg_type = syscall_infos[syscall_idx].arg_types[i];
+//             switch (arg_type) {
+//                 case ARG_TYPE_STRING: {
+//                     char *param_str = read_string_from_process(child_pid, args[i]);
+//                     printf("  arg%d: \"%s\" (string)\n", i, param_str ? param_str : "(null)");
+//                     free(param_str);
+//                     break;
+//                 }
+//                 case ARG_TYPE_INT:
+//                     printf("  arg%d: %lld (int)\n", i, args[i]);
+//                     break;
+//                 case ARG_TYPE_POINTER:
+//                     printf("  arg%d: 0x%llx (pointer)\n", i, args[i]);
+//                     break;
+//                 case ARG_TYPE_OTHER:
+//                 default:
+//                     printf("  arg%d: 0x%llx (other/unknown)\n", i, args[i]);
+//                     break;
+//             }
+//         }
+//     }
+// }
 
 void trace_child(pid_t child_pid, Rule *head_rule) {
     int status;
@@ -750,7 +743,7 @@ void trace_child(pid_t child_pid, Rule *head_rule) {
             if (!in_syscall) {
                 // 系统调用入口点
                 ptrace(PTRACE_GETREGS, child_pid, NULL, &regs);
-                long syscall_num = regs.orig_rax;
+                long syscall_num = regs.orig_rax;  //sys_num: 当前系统调用号
                 
                 // 检查系统调用是否存在于我们支持的列表中
                 int syscall_idx = -1; //当前系统调用在调用表中的索引
@@ -776,9 +769,9 @@ void trace_child(pid_t child_pid, Rule *head_rule) {
                         // 检查系统调用名称是否与当前规则匹配
                         if (strcmp(syscall_infos[syscall_idx].name, rule->syscall_name) == 0) {
                             // 如果没有参数条件或参数条件匹配，则阻止系统调用
-                            if (rule->param_count == 0 || match_rule(child_pid, rule, syscall_num, &regs)) {
+                            if (rule->param_count == 0 || match_rule(child_pid, rule, &regs)) {
                                 // 处理并打印被阻止的系统调用信息
-                                handle_blocked_syscall(child_pid, rule, syscall_num, &regs);
+                                handle_blocked_syscall(child_pid, syscall_num, &regs);
                                 
                                 // 设置全局标志，表示检测到被阻止的系统调用
                                 sandbox_blocked = 1;

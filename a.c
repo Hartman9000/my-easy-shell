@@ -3,5 +3,11 @@
 #include <sys/mman.h>
 
 int main() {
-    write(1, "hello world", 11);
+	printf("Hello, NJU!\n");
+	fflush(stdout);
+	printf("hello");
+	fflush(stdout);
+	printf(" world\n");
+	fflush(stdout);
+	return 0;
 }
