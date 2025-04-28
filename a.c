@@ -3,5 +3,5 @@
 #include <sys/mman.h>
 
 int main() {
-    write(1, "hello", 5);
+    write(1, "hello world", 11);
 }

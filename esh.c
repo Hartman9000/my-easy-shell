@@ -28,7 +28,6 @@
 #define EXIT_ERROR 1         // 执行错误
 #define EXIT_SYNTAX_ERROR 17  // 语法错误
 #define EXIT_CMD_NOT_FOUND 127  // 命令未找到
-#define EXIT_SANDBOX_BLOCKED 42
 
 void print_prompt() {
     printf("esh > ");
@@ -456,31 +455,31 @@ char* read_string_from_process(pid_t pid, unsigned long addr) {
     
     size_t i = 0;
     long data;
+    size_t bytes_read = 0;
     
     while (i < 4095) {
         errno = 0;
-        data = ptrace(PTRACE_PEEKDATA, pid, addr + i, NULL);
+        data = ptrace(PTRACE_PEEKDATA, pid, addr + bytes_read, NULL);
         if (errno != 0) {
             free(str);
             return NULL;
         }
         
-        memcpy(str + i, &data, sizeof(long));
-        
-        // 检查是否到达字符串结尾
-        int found_null = 0;
-        for (size_t j = 0; j < sizeof(long); j++) {
-            if (str[i + j] == '\0') {
-                found_null = 1;
-                break;
+        // 逐字节处理，避免写入过多数据
+        unsigned char *c = (unsigned char *)&data;
+        for (size_t j = 0; j < sizeof(long) && i < 4095; j++) {
+            str[i++] = c[j];
+            bytes_read++;
+            
+            // 检测到null终止符就结束
+            if (c[j] == '\0') {
+                return str;
             }
         }
-        
-        if (found_null) break;
-        i += sizeof(long);
     }
     
-    str[4095] = '\0'; // 确保字符串结束
+    // 确保字符串总是以null终止
+    str[i < 4095 ? i : 4095] = '\0';
     return str;
 }
 
@@ -573,7 +572,7 @@ int match_rule(pid_t child_pid, Rule *rule, long syscall_num, struct user_regs_s
 
 // 将参数值转换为适当的字符串形式
 char* format_param_value(pid_t child_pid, unsigned long long arg_value, arg_type_t arg_type) {
-    char* result = malloc(256); // 足够大的缓冲区
+    char* result = malloc(1024); // 足够大的缓冲区
     if (!result) return NULL;
     
     switch (arg_type) {
@@ -581,22 +580,22 @@ char* format_param_value(pid_t child_pid, unsigned long long arg_value, arg_type
             // 字符串类型: 从进程内存读取并添加引号
             char* str = read_string_from_process(child_pid, arg_value);
             if (str) {
-                snprintf(result, 255, "\"%s\"", str);
+                snprintf(result, 1023, "\"%s\"", str);
                 free(str);
             } else {
-                snprintf(result, 255, "\"\"");
+                snprintf(result, 1023, "\"\"");
             }
             break;
         }
         case ARG_TYPE_INT:
             // 整数类型: 直接转换为字符串
-            snprintf(result, 255, "%lld", arg_value);
+            snprintf(result, 1023, "%lld", arg_value);
             break;
         case ARG_TYPE_POINTER:
         case ARG_TYPE_OTHER:
         default:
             // 指针和其他类型: 转换为十六进制，前缀0x
-            snprintf(result, 255, "0x%llx", arg_value);
+            snprintf(result, 1023, "0x%llx", arg_value);
             break;
     }
     
@@ -633,6 +632,42 @@ void handle_blocked_syscall(pid_t child_pid, Rule *rule, long syscall_num, struc
     if (param_count > 0) {
         for (int i = 0; i < param_count; i++) {
                 param_strings[i] = format_param_value(child_pid, args[i], syscall_infos[syscall_index].arg_types[i]);
+
+            // 特殊处理 write 系统调用的情况
+            if (syscall_num == 1 && i == 1 && param_count >= 3) {
+                // write 系统调用，第2个参数是缓冲区，第3个参数是长度
+                unsigned long long buf_len = args[2]; // 第3个参数是长度
+                
+                // 只处理字符串类型的参数
+                if (syscall_infos[syscall_index].arg_types[i] == ARG_TYPE_STRING) {
+                    // 重新读取字符串，限制长度为 buf_len
+                    char* str = read_string_from_process(child_pid, args[i]);
+                    if (str) {
+                        // 释放之前生成的字符串
+                        free(param_strings[i]);
+                        
+                        // 创建一个新缓冲区，大小足以容纳 buf_len 长度的字符串加上引号和终止符
+                        char* limited_buf = malloc(buf_len + 3);
+                        if (limited_buf) {
+                            // 复制带引号的格式
+                            limited_buf[0] = '"';
+                            
+                            // 复制最多 buf_len 个字符，不进行特殊字符处理
+                            size_t j;
+                            for (j = 0; j < buf_len && str[j]; j++) {
+                                limited_buf[j + 1] = str[j];
+                            }
+                            
+                            // 添加结束引号和终止符
+                            limited_buf[j + 1] = '"';
+                            limited_buf[j + 2] = '\0';
+                            
+                            param_strings[i] = limited_buf;
+                        }
+                        free(str);
+                    }
+                }
+            }
         }
     }
     
@@ -1022,9 +1057,7 @@ int handle_cmd(char *tokens[], int token_count, Rule *head_rule) {
         if (WIFEXITED(status)) {
             // 根据子进程的退出状态码判断错误类型
             int exit_code = WEXITSTATUS(status);
-            if (exit_code == EXIT_SANDBOX_BLOCKED) {
-                continue;
-            } else if (exit_code == EXIT_CMD_NOT_FOUND) {
+            if (exit_code == EXIT_CMD_NOT_FOUND) {
                 print_command_not_found();
             } else if (exit_code == EXIT_SYNTAX_ERROR) {
                 print_invalid_syntax();
