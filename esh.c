@@ -301,7 +301,7 @@ int check_tokens(char *tokens[]) {
 Rule *parse_rules(const char *filename, Rule **head_rule) {
     FILE *file = fopen(filename, "r");
     if (!file) {
-        perror("Failed to open rule file");
+        // perror("Failed to open rule file");
         return NULL;  // 返回NULL但不输出错误信息
     }
 
@@ -681,39 +681,39 @@ void handle_blocked_syscall(pid_t child_pid, long syscall_num, struct user_regs_
     }
 }
 
-// void show_syscall(int syscall_idx,pid_t child_pid, struct user_regs_struct *regs) {
-//     if (syscall_idx >= 0) {
-//         // 获取系统调用的参数值
-//         unsigned long long args[6] = {
-//             regs->rdi, regs->rsi, regs->rdx, 
-//             regs->r10, regs->r8, regs->r9
-//         };
-//         // 如果系统调用被支持，打印调试信息
-//         printf("Detected supported syscall: %s\n", syscall_infos[syscall_idx].name);
-//         // 打印系统调用的参数
-//         for (int i = 0; i < 6; i++) {
-//             arg_type_t arg_type = syscall_infos[syscall_idx].arg_types[i];
-//             switch (arg_type) {
-//                 case ARG_TYPE_STRING: {
-//                     char *param_str = read_string_from_process(child_pid, args[i]);
-//                     printf("  arg%d: \"%s\" (string)\n", i, param_str ? param_str : "(null)");
-//                     free(param_str);
-//                     break;
-//                 }
-//                 case ARG_TYPE_INT:
-//                     printf("  arg%d: %lld (int)\n", i, args[i]);
-//                     break;
-//                 case ARG_TYPE_POINTER:
-//                     printf("  arg%d: 0x%llx (pointer)\n", i, args[i]);
-//                     break;
-//                 case ARG_TYPE_OTHER:
-//                 default:
-//                     printf("  arg%d: 0x%llx (other/unknown)\n", i, args[i]);
-//                     break;
-//             }
-//         }
-//     }
-// }
+void show_syscall(int syscall_idx,pid_t child_pid, struct user_regs_struct *regs) {
+    if (syscall_idx >= 0) {
+        // 获取系统调用的参数值
+        unsigned long long args[6] = {
+            regs->rdi, regs->rsi, regs->rdx, 
+            regs->r10, regs->r8, regs->r9
+        };
+        // 如果系统调用被支持，打印调试信息
+        printf("Detected supported syscall: %s\n", syscall_infos[syscall_idx].name);
+        // 打印系统调用的参数
+        for (int i = 0; i < 6; i++) {
+            arg_type_t arg_type = syscall_infos[syscall_idx].arg_types[i];
+            switch (arg_type) {
+                case ARG_TYPE_STRING: {
+                    char *param_str = read_string_from_process(child_pid, args[i], 30);
+                    printf("  arg%d: \"%s\" (string)\n", i, param_str ? param_str : "(null)");
+                    free(param_str);
+                    break;
+                }
+                case ARG_TYPE_INT:
+                    printf("  arg%d: %lld (int)\n", i, args[i]);
+                    break;
+                case ARG_TYPE_POINTER:
+                    printf("  arg%d: 0x%llx (pointer)\n", i, args[i]);
+                    break;
+                case ARG_TYPE_OTHER:
+                default:
+                    printf("  arg%d: 0x%llx (other/unknown)\n", i, args[i]);
+                    break;
+            }
+        }
+    }
+}
 
 void trace_child(pid_t child_pid, Rule *head_rule) {
     int status;
@@ -757,8 +757,6 @@ void trace_child(pid_t child_pid, Rule *head_rule) {
                 // 调试内容
                 // if (syscall_idx >=0) {
                 //     printf("in_syscall:%d\n",in_syscall);
-                //     printf("WSTOPSIG(status):%u\n", WSTOPSIG(status));
-                //     printf("SIGTRAP | 0x80:%u\n", SIGTRAP | 0x80);
                 //     show_syscall(syscall_idx, child_pid, &regs);
                 // }
                 
@@ -786,7 +784,7 @@ void trace_child(pid_t child_pid, Rule *head_rule) {
                     }
                 }
             }
-            in_syscall = in_syscall == 1 ? 0 : 1;
+            in_syscall = !in_syscall;
         }
         
         
