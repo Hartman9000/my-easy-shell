@@ -718,78 +718,125 @@ void show_syscall(int syscall_idx,pid_t child_pid, struct user_regs_struct *regs
 void trace_child(pid_t child_pid, Rule *head_rule) {
     int status;
     struct user_regs_struct regs;
-    int in_syscall = 0; // 跟踪是否正在系统调用中
+    
+    // 存储每个进程的系统调用状态
+    int in_syscall[1024] = {0};  // 0表示进入点，1表示退出点
+    
+    // 存储所有被跟踪的进程
+    pid_t traced_pids[1024] = {0};
+    int pid_count = 1;
+    traced_pids[0] = child_pid;
 
-    while (1) {
-        waitpid(child_pid, &status, 0);
+    while (pid_count > 0) {
+        // 等待任意子进程的状态改变
+        pid_t current_pid = waitpid(-1, &status, __WALL);
+        if (current_pid == -1) {
+            break;
+        }
         
-        if (WIFEXITED(status)) {
-            break; // 子进程已退出
+        // 进程已退出
+        if (WIFEXITED(status) || WIFSIGNALED(status)) {
+            for (int i = 0; i < pid_count; i++) {
+                if (traced_pids[i] == current_pid) {
+                    traced_pids[i] = traced_pids[pid_count - 1];
+                    pid_count--;
+                    break;
+                }
+            }
+            continue;
         }
         
         if (!WIFSTOPPED(status)) {
-            continue; // 不是因为停止信号而停止的
-        }
-        
-        // 检查是否是 SIGSTOP 导致的停顿
-        if (WSTOPSIG(status) == SIGSTOP) {
-            ptrace(PTRACE_SETOPTIONS, child_pid, 0, PTRACE_O_TRACESYSGOOD); // 设置TRACESYSGOOD选项
-            ptrace(PTRACE_SYSCALL, child_pid, NULL, NULL);
+            ptrace(PTRACE_SYSCALL, current_pid, NULL, NULL);
             continue;
         }
-
+        
+        // 处理新进程的第一次停止
+        if (WSTOPSIG(status) == SIGSTOP) {
+            ptrace(PTRACE_SETOPTIONS, current_pid, 0, 
+                   PTRACE_O_TRACESYSGOOD | 
+                   PTRACE_O_TRACECLONE | 
+                   PTRACE_O_TRACEFORK | 
+                   PTRACE_O_TRACEVFORK);
+            ptrace(PTRACE_SYSCALL, current_pid, NULL, NULL);
+            continue;
+        }
+        
+        // 处理克隆/派生子进程事件
+        if ((status >> 8) == (SIGTRAP | (PTRACE_EVENT_CLONE << 8)) ||
+            (status >> 8) == (SIGTRAP | (PTRACE_EVENT_FORK << 8)) ||
+            (status >> 8) == (SIGTRAP | (PTRACE_EVENT_VFORK << 8))) {
+            
+            unsigned long new_pid;
+            ptrace(PTRACE_GETEVENTMSG, current_pid, 0, &new_pid);
+            
+            if (pid_count < 1024) {
+                traced_pids[pid_count++] = new_pid;
+            }
+            
+            ptrace(PTRACE_SYSCALL, current_pid, NULL, NULL);
+            continue;
+        }
+        
+        // 找到当前进程在进程列表中的索引
+        int proc_idx = -1;
+        for (int i = 0; i < pid_count; i++) {
+            if (traced_pids[i] == current_pid) {
+                proc_idx = i;
+                break;
+            }
+        }
+        
+        if (proc_idx == -1) {
+            ptrace(PTRACE_SYSCALL, current_pid, NULL, NULL);
+            continue;
+        }
+        
         // 处理系统调用
         if (WSTOPSIG(status) == (SIGTRAP | 0x80)) {
-            if (!in_syscall) {
-                // 系统调用入口点
-                ptrace(PTRACE_GETREGS, child_pid, NULL, &regs);
-                long syscall_num = regs.orig_rax;  //sys_num: 当前系统调用号
+            if (in_syscall[proc_idx] == 0) {
+                // 系统调用入口点 - 检查规则
+                ptrace(PTRACE_GETREGS, current_pid, NULL, &regs);
+                long syscall_num = regs.orig_rax;
                 
-                // 检查系统调用是否存在于我们支持的列表中
-                int syscall_idx = -1; //当前系统调用在调用表中的索引
+                int syscall_idx = -1;
                 for (int i = 0; i < SYSCALLS_NUM; i++) {
                     if (syscall_infos[i].syscall_number == syscall_num) {
                         syscall_idx = i;
                         break;
                     }
                 }
-    
-                // 调试内容
-                // if (syscall_idx >=0) {
-                //     printf("in_syscall:%d\n",in_syscall);
-                //     show_syscall(syscall_idx, child_pid, &regs);
-                // }
-                
+        
                 if (syscall_idx >= 0) {
-                    // 检查系统调用是否被规则禁止
                     Rule *rule = head_rule;
                     while (rule != NULL) {
-                        // 检查系统调用名称是否与当前规则匹配
                         if (strcmp(syscall_infos[syscall_idx].name, rule->syscall_name) == 0) {
-                            // 如果没有参数条件或参数条件匹配，则阻止系统调用
-                            if (rule->param_count == 0 || match_rule(child_pid, rule, &regs)) {
-                                // 处理并打印被阻止的系统调用信息
-                                handle_blocked_syscall(child_pid, syscall_num, &regs);
-                                
-                                // 设置全局标志，表示检测到被阻止的系统调用
+                            if (rule->param_count == 0 || match_rule(current_pid, rule, &regs)) {
+                                // 系统调用匹配规则，在执行前拦截
+                                handle_blocked_syscall(current_pid, syscall_num, &regs);
                                 sandbox_blocked = 1;
                                 
-                                // 杀死子进程
-                                ptrace(PTRACE_KILL, child_pid, NULL, NULL);
+                                // 修改系统调用号为-1，使系统调用无效
+                                regs.orig_rax = -1;
+                                ptrace(PTRACE_SETREGS, current_pid, NULL, &regs);
                                 
-                                return;  // 立即返回
+                                // 终止所有进程
+                                for (int j = 0; j < pid_count; j++) {
+                                    kill(traced_pids[j], SIGKILL);
+                                }
+                                return;
                             }
                         }
                         rule = rule->next;
                     }
                 }
             }
-            in_syscall = !in_syscall;
+            // 切换系统调用状态
+            in_syscall[proc_idx] = !in_syscall[proc_idx];
         }
         
-        
-        // 继续执行直到下一个系统调用
-        ptrace(PTRACE_SYSCALL, child_pid, NULL, NULL);
+        // 继续执行
+        ptrace(PTRACE_SYSCALL, current_pid, NULL, NULL);
     }
 }
 

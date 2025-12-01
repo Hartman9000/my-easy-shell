@@ -1,13 +1,18 @@
-#include <stdio.h>
+#define _GNU_SOURCE
 #include <unistd.h>
-#include <sys/mman.h>
+#include <stdio.h>
+#include <sys/wait.h>
+#include <sys/syscall.h>
 
 int main() {
-	printf("Hello, NJU!\n");
-	fflush(stdout);
-	printf("hello");
-	fflush(stdout);
-	printf(" world\n");
-	fflush(stdout);
-	return 0;
+    pid_t pid = syscall(SYS_fork);
+    if (pid == 0) {
+        printf("Child process\n");
+        fflush(stdout);
+    } else {
+        wait(0);
+        printf("Parent process\n");
+        fflush(stdout);
+    }
+    return 0;
 }

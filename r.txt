@@ -1,1 +1,1 @@
-deny:execve
+deny:write
